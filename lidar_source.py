@@ -63,7 +63,7 @@ class RPLidarC1Source:
         asyncio.run(self._async_main())
 
     async def _async_main(self):
-        from scanner import RPLidar  # imported lazily -- only needed in "real" mode
+        from rplidarc1 import RPLidar  # imported lazily -- only needed in "real" mode
 
         self._lidar = RPLidar(self.port, self.baudrate, timeout=self.timeout)
         try:
@@ -92,8 +92,15 @@ class RPLidarC1Source:
                 item = await asyncio.wait_for(self._lidar.output_queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
                 continue
-            angle = float(item["a_deg"]) % 360.0
-            dist = float(item["d_mm"])
+            raw_angle = item.get("a_deg")
+            raw_dist = item.get("d_mm")
+            if raw_angle is None or raw_dist is None:
+                continue
+            try:
+                angle = float(raw_angle) % 360.0
+                dist = float(raw_dist)
+            except (TypeError, ValueError):
+                continue
             quality = int(item.get("q", 0))
             bucket = int(angle / self._bucket)
             with self._lock:

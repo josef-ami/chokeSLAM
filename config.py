@@ -45,4 +45,4 @@ STREAM_HZ = 10
 #            real odometry (see odometry.py's OdometrySource) to your
 #            STM32/encoder+IMU feed -- that part is stubbed, not simulated,
 #            in "real" mode.
-MODE = "mock"
+MODE = "real"
