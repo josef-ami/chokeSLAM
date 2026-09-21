@@ -1,0 +1,10 @@
+# Dashboard + core logic (works with just this, in mock mode)
+flask>=3.0
+numpy>=1.24
+
+# Real hardware only (Raspberry Pi side) -- not installable/testable in the
+# sandbox this was built in (no network access to PyPI there), written
+# directly against rplidarc1's published docs. Verify against your existing
+# lidar_probe.py experience before trusting lidar_source.py.
+rplidarc1
+pyserial

@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WRO Localization Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #161d2e; --ink: #e7ecf5; --muted: #8993a8;
+    --lane: #1c2740; --island: #232e46; --wall: #4c5b7a;
+    --ok: #3ecf8e; --bad: #e5556b; --wallpt: #5aa9ff; --pillarpt: #ffb454; --unpt: #556077;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
+  #layout { display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #matWrap { background: var(--panel); border-radius: 12px; padding: 12px; }
+  canvas { display: block; border-radius: 8px; background: #0b0f18; }
+  #panel { background: var(--panel); border-radius: 12px; padding: 16px; min-width: 280px; flex: 1; }
+  h1 { font-size: 16px; margin: 0 0 12px; color: var(--muted); font-weight: 600; letter-spacing: .02em; }
+  .row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #232c40; font-size: 13px; }
+  .row span:first-child { color: var(--muted); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.ok { background: rgba(62,207,142,.15); color: var(--ok); }
+  .badge.bad { background: rgba(229,85,107,.15); color: var(--bad); }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+  #reason { font-size: 12px; color: var(--muted); margin-top: 6px; word-break: break-word; }
+</style>
+</head>
+<body>
+<div id="layout">
+  <div id="matWrap"><canvas id="mat" width="760" height="760"></canvas></div>
+  <div id="panel">
+    <h1>ESTIMATED POSE</h1>
+    <div class="row"><span>mode</span><span id="mode">-</span></div>
+    <div class="row"><span>section</span><span id="section">-</span></div>
+    <div class="row"><span>x, y (mm)</span><span id="xy">-</span></div>
+    <div class="row"><span>heading (deg)</span><span id="heading">-</span></div>
+    <div class="row"><span>lateral from outer (mm)</span><span id="lateral">-</span></div>
+    <div class="row"><span>along section (mm)</span><span id="along">-</span></div>
+
+    <h1 style="margin-top:18px">LAST BROADSIDE FIX</h1>
+    <div class="row"><span>status</span><span id="fixStatus">-</span></div>
+    <div class="row"><span>front / back (mm)</span><span id="frontBack">-</span></div>
+    <div class="row"><span>sum (expect ~1000)</span><span id="laneSum">-</span></div>
+    <div id="reason"></div>
+
+    <div class="legend">
+      <div><span class="dot" style="background:var(--wallpt)"></span>wall points</div>
+      <div><span class="dot" style="background:var(--pillarpt)"></span>pillar points</div>
+      <div><span class="dot" style="background:var(--unpt)"></span>unclassified</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('mat');
+const ctx = canvas.getContext('2d');
+let field = null;
+const MARGIN = 24;
+
+function toCanvas(x_mm, y_mm) {
+  const size = field.outer_size_mm;
+  const scale = (canvas.width - 2 * MARGIN) / size;
+  return [MARGIN + x_mm * scale, canvas.height - MARGIN - y_mm * scale, scale];
+}
+
+function drawField() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const [ox, oy, scale] = toCanvas(0, 0);
+  const size = field.outer_size_mm * scale;
+
+  // lane background
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--lane');
+  ctx.fillRect(ox, oy - size, size, size);
+
+  // outer wall
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--wall');
+  ctx.lineWidth = 3;
+  ctx.strokeRect(ox, oy - size, size, size);
+
+  // island
+  const [ix, iy] = toCanvas(field.island_min_mm, field.island_max_mm);
+  const islandSize = (field.island_max_mm - field.island_min_mm) * scale;
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--island');
+  ctx.fillRect(ix, iy, islandSize, islandSize);
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--wall');
+  ctx.lineWidth = 2;
+  ctx.strokeRect(ix, iy, islandSize, islandSize);
+
+  // 24 placeholder slots
+  ctx.strokeStyle = '#3a4666';
+  ctx.lineWidth = 1;
+  const slotPx = 16;
+  for (const s of field.slots) {
+    const [sx, sy] = toCanvas(s.x_mm, s.y_mm);
+    ctx.strokeRect(sx - slotPx / 2, sy - slotPx / 2, slotPx, slotPx);
+  }
+}
+
+function drawPillars(pillars) {
+  for (const p of pillars || []) {
+    const [px, py] = toCanvas(p.x_mm, p.y_mm);
+    ctx.fillStyle = p.color === 'red' ? '#e5556b' : '#3ecf8e';
+    ctx.beginPath();
+    ctx.arc(px, py, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawPoints(points) {
+  for (const p of points) {
+    const [px, py] = toCanvas(p.x, p.y);
+    ctx.fillStyle = p.kind === 'wall' ? '#5aa9ff' : (p.kind === 'pillar' ? '#ffb454' : '#556077');
+    ctx.beginPath();
+    ctx.arc(px, py, p.kind === 'wall' ? 1.6 : 2.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawRobot(pose, color, filled) {
+  const [px, py] = toCanvas(pose.x_mm, pose.y_mm);
+  const h = -pose.heading_deg * Math.PI / 180; // canvas y flipped
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(px, py, 9, 0, Math.PI * 2);
+  if (filled) ctx.fill(); else ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  ctx.lineTo(px + 22 * Math.cos(h), py + 22 * Math.sin(h));
+  ctx.stroke();
+}
+
+function setText(id, text) { document.getElementById(id).textContent = text; }
+
+function render(state) {
+  drawField();
+  drawPillars(state.pillars);
+  drawPoints(state.points);
+  if (state.true) drawRobot(state.true, '#8993a8', false);
+  drawRobot(state.estimated, '#5aa9ff', true);
+
+  setText('mode', state.mode);
+  setText('section', state.estimated.section);
+  setText('xy', `${state.estimated.x_mm.toFixed(0)}, ${state.estimated.y_mm.toFixed(0)}`);
+  setText('heading', state.estimated.heading_deg.toFixed(1));
+  setText('lateral', state.estimated.lateral_mm.toFixed(0));
+  setText('along', state.estimated.along_mm.toFixed(0));
+
+  const fix = state.last_fix;
+  const badge = document.getElementById('fixStatus');
+  if (fix) {
+    badge.innerHTML = `<span class="badge ${fix.ok ? 'ok' : 'bad'}">${fix.ok ? 'OK' : 'REJECTED'}</span>`;
+    setText('frontBack', (fix.front_mm ?? '-') + ' / ' + (fix.back_mm ?? '-'));
+    setText('laneSum', fix.lane_sum_mm ?? '-');
+    setText('reason', fix.reason || '');
+  }
+}
+
+async function init() {
+  const res = await fetch('/api/field');
+  field = await res.json();
+  drawField();
+
+  const es = new EventSource('/stream');
+  es.onmessage = (ev) => {
+    const state = JSON.parse(ev.data);
+    render(state);
+  };
+  es.onerror = () => { console.warn('stream disconnected, browser will retry'); };
+}
+init();
+</script>
+</body>
+</html>
