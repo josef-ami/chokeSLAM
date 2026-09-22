@@ -240,12 +240,12 @@ def compute_start_of_run_fix(clusters: list[Cluster], driving_direction: str = "
 
     # CCW: outer wall on the LEFT; along = forward.  CW mirrors both.
     if driving_direction == "CCW":
-        lateral_from_outer = left_d - lat_offset
+    #   lateral_from_outer = left_d - lat_offset   
         along = forward
     else:
         lateral_from_outer = right_d - lat_offset
-        along = geo.OUTER_SIZE_MM - forward
-
+        #along = geo.OUTER_SIZE_MM - forward
+    along=geo.OUTER_SIZE_MM - forward
     return StartOfRunFix(
         ok=True,
         forward_distance_mm=forward,
