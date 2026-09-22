@@ -89,6 +89,26 @@ def _candidates_to_list(candidates):
             for c in candidates]
 
 
+def _debug_dump_clusters(clusters, label=""):
+    """Prints EVERY cluster (not just ones classified 'wall') with its
+    robot-relative angle range and fit quality. Call this whenever
+    compute_broadside_fix/compute_start_of_run_fix fails, so the next
+    failure is fully visible in one shot instead of needing another
+    round-trip. Reading it: nothing near the expected angle (0/90/180/270)
+    at all suggests an angle-calibration problem (LIDAR_ANGLE_SIGN /
+    _ZERO_OFFSET_DEG -- see config.py); something there but classified
+    'pillar'/'unclassified' with a short span or high flatness suggests
+    a physical occlusion (chassis, bracket, wiring) or too-close range
+    (MIN_RANGE_MM) rather than a calibration issue."""
+    print(f"[debug] full cluster dump{f' ({label})' if label else ''}:")
+    for c in clusters:
+        a0, a1 = c.points[0].angle_deg, c.points[-1].angle_deg
+        dist = None if c.line_distance_mm is None else round(c.line_distance_mm, 1)
+        flat = None if c.flatness_residual_mm is None else round(c.flatness_residual_mm, 1)
+        print(f"  kind={c.kind:12s} angle=({a0:6.1f},{a1:6.1f}) span={c.angular_span_deg:5.1f} "
+              f"n={len(c.points):3d} dist={dist} flat={flat}")
+
+
 def _mock_mode_loop():
     from simulation import MockRobotSimulator
 
@@ -130,6 +150,7 @@ def _mock_mode_loop():
         # etc.) -- fall back to 0.0 like before and flag it loudly rather
         # than silently trusting a bad number.
         print(f"[start-of-run fix] FAILED: {start_fix.reason} -- along_mm defaulting to 0.0")
+        _debug_dump_clusters(clusters, label="start-of-run, mock")
         initial_along_mm = 0.0
         start_candidates = []
 
@@ -218,6 +239,7 @@ def _real_mode_loop():
         start_candidates = candidate_start_positions(start_fix.along_mm, start_fix.lateral_from_outer_mm)
     else:
         print(f"[start-of-run fix] FAILED: {start_fix.reason} -- along_mm defaulting to 0.0")
+        _debug_dump_clusters(start_clusters, label="start-of-run, real")
         initial_along_mm = 0.0
         start_candidates = []
 

@@ -36,7 +36,7 @@ robot passes through a corner.
 |---|---|
 | `mat_geometry.py` | Field constants (outer size, lane width, island, 4 sections, 24 slots) and section-local <-> global coordinate conversion. **Verify `OUTER_SIZE_MM` against your actual mat** -- it was read off the mat artwork, not stated explicitly in the rules pages we reviewed. |
 | `scan_processing.py` | Turns a raw scan into classified wall/pillar clusters (arc-length threshold, not point count; total-least-squares line fit for a denoised, sub-single-ray perpendicular distance). |
-| `localization.py` | The broadside fix (front=outer wall, back=inner wall, sanity-checks front+back≈1000mm) and `PoseEstimator`, which fuses it with odometry. Also the one-time start-of-run fix (`compute_start_of_run_fix`, `candidate_start_positions`) -- see below. |
+| `localization.py` | The broadside fix (front=outer wall; back is inferred from front, not read -- see below) and `PoseEstimator`, which fuses it with odometry. Also the one-time start-of-run fix (`compute_start_of_run_fix`, `candidate_start_positions`) -- see below. |
 | `lidar_source.py` | Real-hardware RPLidar C1 interface (untested, see above). |
 | `simulation.py` | Mock world + robot, used only in mock mode. |
 | `dashboard_server.py` | Flask app: runs the pipeline in a background thread, serves the dashboard over Server-Sent Events. |
@@ -63,6 +63,41 @@ your STM32 UART telemetry into `estimator.update_heading()` /
 Pi already and couldn't be written here without your protocol -- the
 integration points are commented inline.
 
+## Back reading dropped -- front-only lateral fix
+
+Real hardware testing found the LIDAR's rear is permanently blocked by the
+robot's own chassis: a raw scan dump showed front, left, and right all
+resolving to clean, smooth wall returns close to their expected angles,
+while a ~105 degree arc centred almost exactly on 180 degrees
+robot-relative was all single-digit-millimetre readings -- the sensor
+pressed up against the chassis, not a wall. This isn't a near-corner
+artifact like the ones documented below; it's present everywhere on the
+mat, on every section, so `compute_broadside_fix()` (the original lateral
+fix, used after **every** corner turn, not just at start-of-run) could
+never have passed its old front+back≈1000mm check on this robot,
+regardless of calibration.
+
+Back is now **inferred** from front instead of independently read:
+`back_d = LANE_WIDTH_MM - front_d`, since the two have to sum to the lane
+width by definition of the lane. `compute_broadside_fix()` and
+`compute_start_of_run_fix()` both only search for a front wall cluster
+now (plus, for the latter, the two side rays -- unaffected, they're well
+clear of the blocked arc). This trades away the old front+back
+cross-check -- with back defined from front, that sum is now always
+exactly `LANE_WIDTH_MM`, not a real validation -- for a plausibility bound
+on front_d instead: a genuine outer-wall reading has to land inside the
+lane (`0 < front_d < LANE_WIDTH_MM`, with `LANE_WIDTH_TOLERANCE_MM` as
+noise margin either side). `BroadsideFix`/`StartOfRunFix` still report
+`back_distance_mm` and `lane_sum_mm` for the dashboard, just inferred
+rather than measured -- the dashboard now labels them as such rather than
+implying a live cross-check that isn't happening.
+
+If the chassis is ever modified to give the LIDAR a clear line of sight
+behind -- even a narrow slot, the search window is only ±15 degrees --
+this is straightforward to revert: restore the `back = _find_wall_near(...)`
+search and the real front+back sum check in both functions (see git
+history prior to this change).
+
 ## Start-of-run: resolving along-track position and the 4-leg ambiguity
 
 The original design only ever resolved LATERAL (cross-lane) position from
@@ -70,7 +105,7 @@ the broadside fix -- along-track position (`along_mm`, how far along the
 current section's edge you are) had to be typed in by hand
 (`initial_along_mm`), and which of the 4 sections (S/E/N/W) you're even on
 always has to be supplied (`initial_section`) -- neither is recoverable
-from the front/back reading alone.
+from the front reading alone.
 
 `compute_start_of_run_fix()` now also reads the LEFT (90 deg
 robot-relative) and RIGHT (270 deg) rays at the same one-time start-of-run
@@ -80,12 +115,12 @@ toward the far corner, right toward the near corner (verified against
 `mat_geometry._section_axes` for all 4) -- so `along_mm = right_raw -
 LIDAR_OFFSET_LATERAL_MM`, cross-checked against `OUTER_SIZE_MM - left_raw -
 LIDAR_OFFSET_LATERAL_MM`, with a left+right≈`OUTER_SIZE_MM` sanity check
-(same spirit as the existing front+back≈1000mm one). This replaces the
+(same spirit as the front plausibility bound above). This replaces the
 manual `initial_along_mm` guess with a real reading, for whichever section
 turns out to be the right one.
 
 It still can't tell you *which* section that is -- that's the same
-unresolvable gap the front/back fix always had, just now stated for
+unresolvable gap the front fix always had, just now stated for
 along-track too. `candidate_start_positions()` takes the along/lateral pair
 and expands it into all 8 dashboard markers: one for each of the 4 sections
 x 2 headings (the section's real broadside heading, and that +90 degrees,
@@ -96,24 +131,26 @@ one-time DISPLAY addition only: the live-tracked pose still needs
 `initial_section` supplied manually, same as before, now just auto-filled
 with a real `along_mm` instead of a guess.
 
-**This is pickier than it looks -- read before relying on it.** Sweeping
-the mock simulator across along/lateral combinations (noiseless, to
-isolate the geometry from sensor noise) found the window where front,
-back, left, AND right *all* resolve cleanly is often much narrower than
-mat_geometry's existing back/island safe-zone margin, and not simply
-centred in the section -- at one lateral offset tested it was a ~250mm
-window near the middle, at another a ~30mm window near a corner, and at
-two others it didn't open anywhere in the section at all. Root cause:
-the near/far OUTER corners are real sharp 90-degree corners too, so a
-side ray taken too close to one blends the perpendicular wall and the
-along-track wall into one continuously-curving return, the same
-corner-blending effect already documented below for the back ray and the
-island -- clustering correctly refuses to call that flat, and this fix
-correctly rejects it (confirmed: no silent wrong answer), but it means
-you can't assume any particular starting spot works. Verify the workable
-range for your own geometry; `dashboard_server.py`'s mock demo overrides
-the simulator's own default starting `along_mm` (50.0, right next to a
-corner) for exactly this reason.
+**Read before relying on a specific starting spot.** Sweeping the mock
+simulator across along/lateral combinations (noiseless, to isolate the
+geometry from sensor noise) found the window where front, left, AND right
+*all* resolve cleanly is workable across much more of each section now
+that back is no longer part of the requirement -- e.g. at the lane's
+lateral centre (500mm from the outer wall) it's open for roughly
+70-650mm, 1380-1630mm, and 2880-2950mm along the section, versus only a
+single ~250mm window before. It's still not the WHOLE section, and still
+not simply "near the middle" -- at lateral=150mm it didn't open anywhere
+in one sweep. Root cause for what's left: the near/far OUTER corners are
+real sharp 90-degree corners too, so a side ray taken too close to one
+still blends the perpendicular wall and the along-track wall into one
+continuously-curving return, the same corner-blending effect documented
+below for the back ray and the island -- clustering correctly refuses to
+call that flat, and this fix correctly rejects it (confirmed: no silent
+wrong answer), it's just a smaller effect now that only 3 of the 4
+original readings need to simultaneously avoid it instead of 4. Verify
+the workable range for your own geometry; `dashboard_server.py`'s mock
+demo overrides the simulator's own default starting `along_mm` (50.0,
+right next to a corner) for exactly this reason.
 
 ## Findings from actually building and testing this (read this part)
 

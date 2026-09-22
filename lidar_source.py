@@ -114,13 +114,12 @@ class RPLidarC1Source:
         from rplidarc1 import RPLidar  # imported lazily -- only needed in "real" mode
 
         print(f"[lidar] connecting on {self.port} @ {self.baudrate} baud ...")
+        # RPLidar's own constructor already connects the serial port and runs
+        # a healthcheck synchronously (its _initialize()) -- confirmed by
+        # reading rplidarc1's actual source (scanner.py). A second explicit
+        # healthcheck() call here was redundant (that's why you saw two
+        # "In waiting" lines) -- removed.
         self._lidar = RPLidar(self.port, self.baudrate, timeout=self.timeout)
-        try:
-            health = await self._as_coro_maybe(self._lidar.healthcheck)
-            if health is not None:
-                print(f"[lidar] healthcheck: {health}")
-        except Exception as e:
-            print(f"[lidar] healthcheck failed (continuing anyway): {e}")
 
         print("[lidar] starting simple_scan() + drain loop ...")
         async with asyncio.TaskGroup() as tg:
@@ -128,13 +127,6 @@ class RPLidarC1Source:
             tg.create_task(self._drain())
 
         self._lidar.reset()
-
-    @staticmethod
-    async def _as_coro_maybe(fn):
-        result = fn()
-        if asyncio.iscoroutine(result):
-            return await result
-        return result
 
     async def _drain(self):
         while not self._stop_flag.is_set():
@@ -147,10 +139,18 @@ class RPLidarC1Source:
             if raw_angle is None or raw_dist is None:
                 if not self._bad_item_warned:
                     self._bad_item_warned = True
-                    print(f"[lidar] queue item missing expected 'a_deg'/'d_mm' fields "
-                          f"(actual keys: {list(item.keys())}) -- this file's field names "
-                          f"were never verified against a real device, see module docstring. "
-                          f"Update the .get() calls in _drain() to match.")
+                    if "a_deg" not in item or "d_mm" not in item:
+                        print(f"[lidar] queue item missing 'a_deg'/'d_mm' KEYS entirely "
+                              f"(actual keys: {list(item.keys())}) -- field names were never "
+                              f"verified against a real device, see module docstring. "
+                              f"Update the .get() calls in _drain() to match.")
+                    else:
+                        print(f"[lidar] queue item has 'a_deg'/'d_mm' keys present but one is "
+                              f"None (item={item!r}) -- most likely a sentinel/error/"
+                              f"start-of-scan marker from rplidarc1 rather than a real point. "
+                              f"Skipping it (as this does) is probably correct; only worth "
+                              f"digging into further if this fires constantly rather than "
+                              f"occasionally.")
                 continue
             try:
                 angle = float(raw_angle) % 360.0

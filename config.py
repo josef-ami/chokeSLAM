@@ -26,7 +26,12 @@ LIDAR_OFFSET_LATERAL_MM = 0.0        # <-- FILL IN (only matters for along-lane 
 
 # --- Localization tuning -------------------------------------------------
 BROADSIDE_HEADING_TOLERANCE_DEG = 6.0   # how close to the target heading before we trust a fix
-LANE_WIDTH_TOLERANCE_MM = 40.0          # front+back distance sanity check: |sum - 1000| must be under this
+LANE_WIDTH_TOLERANCE_MM = 40.0          # back is inferred from front (LANE_WIDTH_MM - front_d), not
+                                         # independently read -- see localization.compute_broadside_fix.
+                                         # This is now the noise margin on the plausibility bound instead
+                                         # of a front+back cross-check: front_d must land within
+                                         # [0-this, LANE_WIDTH_MM+this] to be trusted as a genuine
+                                         # outer-wall reading.
 FRONT_BACK_SEARCH_WINDOW_DEG = 15.0     # how far from 0 deg / 180 deg (robot-relative) to look for the wall cluster.
                                          # Kept fairly tight, just past BROADSIDE_HEADING_TOLERANCE_DEG: a wide window
                                          # increases the chance of a ray near the edge of the window skimming past a

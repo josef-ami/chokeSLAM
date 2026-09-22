@@ -41,8 +41,7 @@
 
     <h1 style="margin-top:18px">LAST BROADSIDE FIX</h1>
     <div class="row"><span>status</span><span id="fixStatus">-</span></div>
-    <div class="row"><span>front / back (mm)</span><span id="frontBack">-</span></div>
-    <div class="row"><span>sum (expect ~1000)</span><span id="laneSum">-</span></div>
+    <div class="row"><span>front (measured) / back (inferred)</span><span id="frontBack">-</span></div>
     <div id="reason"></div>
 
     <h1 style="margin-top:18px">START-OF-RUN FIX (one-time)</h1>
@@ -198,7 +197,6 @@ function render(state) {
   if (fix) {
     badge.innerHTML = `<span class="badge ${fix.ok ? 'ok' : 'bad'}">${fix.ok ? 'OK' : 'REJECTED'}</span>`;
     setText('frontBack', (fix.front_mm ?? '-') + ' / ' + (fix.back_mm ?? '-'));
-    setText('laneSum', fix.lane_sum_mm ?? '-');
     setText('reason', fix.reason || '');
   }
 

@@ -54,7 +54,12 @@ MIN_POINTS_PER_PILLAR = 2             # reject singleton-point fragments
 
 @dataclass
 class ScanPoint:
-    angle_deg: float   # robot-relative, sensor's own convention (see lidar_source.py)
+    angle_deg: float   # CORRECTED robot-frame angle (angle_sign/angle_zero_offset_deg
+                        # already applied) -- same convention as x_mm/y_mm below, and
+                        # the same one BROADSIDE_HEADING_DEG/front=0/back=180/left=90/
+                        # right=270 downstream code assumes. NOT the sensor's raw angle
+                        # -- see the note on clean_and_project below for why that
+                        # distinction matters.
     dist_mm: float
     quality: int
     x_mm: float = 0.0  # robot-relative cartesian, +X = robot forward, +Y = robot left
@@ -91,6 +96,18 @@ def angle_to_xy(angle_deg: float, dist_mm: float, angle_sign: int = 1, angle_zer
 
 
 def clean_and_project(raw_points, angle_sign: int, angle_zero_offset_deg: float) -> list[ScanPoint]:
+    """FOUND WHILE CALIBRATING ON REAL HARDWARE: this used to store the raw
+    sensor angle in ScanPoint.angle_deg while computing x_mm/y_mm from the
+    CORRECTED (angle_sign/angle_zero_offset_deg-applied) angle -- two
+    different conventions on one object. That's harmless with the config.py
+    defaults (sign=+1, offset=0, i.e. raw==corrected), which is exactly why
+    it went unnoticed, but _find_wall_near() in localization.py searches
+    for clusters near robot-frame targets (0/90/180/270) by comparing
+    against ScanPoint.angle_deg directly -- so the moment a real,
+    non-trivial calibration is set, every direction search would silently
+    start looking in the wrong place. Now angle_deg is corrected too, so
+    it always matches x_mm/y_mm and the 0/90/180/270 targets stay correct
+    regardless of calibration."""
     pts = []
     for angle_deg, dist_mm, quality in raw_points:
         if dist_mm < MIN_RANGE_MM or dist_mm > MAX_RANGE_MM:
@@ -98,7 +115,8 @@ def clean_and_project(raw_points, angle_sign: int, angle_zero_offset_deg: float)
         if quality < MIN_QUALITY:
             continue
         x, y = angle_to_xy(angle_deg, dist_mm, angle_sign, angle_zero_offset_deg)
-        pts.append(ScanPoint(angle_deg=angle_deg % 360.0, dist_mm=dist_mm, quality=quality, x_mm=x, y_mm=y))
+        corrected_angle = (angle_sign * angle_deg + angle_zero_offset_deg) % 360.0
+        pts.append(ScanPoint(angle_deg=corrected_angle, dist_mm=dist_mm, quality=quality, x_mm=x, y_mm=y))
     pts.sort(key=lambda p: p.angle_deg)
     return pts
 

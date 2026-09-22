@@ -3,6 +3,16 @@ The broadside wall-fix (front=outer wall, back=inner wall) and a pose
 estimator that fuses it with continuous odometry, corrected once at the
 corner-turn events your own drive FSM tells it about.
 
+Back is INFERRED from front (back_d = LANE_WIDTH_MM - front_d), not
+independently read -- on this robot most of the LIDAR's rear is
+permanently blocked by its own chassis (confirmed on real hardware: a
+~105deg dead zone centred almost exactly on 180deg robot-relative,
+present regardless of where on the mat the robot is, not just near
+corners). This trades away the old front+back cross-check for a
+plausibility bound on front_d alone (must land inside the lane) -- see
+the comment in compute_broadside_fix for the detail, and the README's
+"Back reading dropped" section for how this was diagnosed.
+
 IMPORTANT GAP THIS MODULE DOES NOT SOLVE: the broadside fix gives you your
 LATERAL position within whichever section you're currently in -- it cannot
 tell you *which of the 4 sections* that is. Nothing about "front wall is
@@ -85,36 +95,41 @@ def compute_broadside_fix(clusters: list[Cluster], heading_deg: float, section: 
             f"+/- {config.BROADSIDE_HEADING_TOLERANCE_DEG} for section {section}"))
 
     front = _find_wall_near(clusters, 0.0, config.FRONT_BACK_SEARCH_WINDOW_DEG)
-    back = _find_wall_near(clusters, 180.0, config.FRONT_BACK_SEARCH_WINDOW_DEG)
-    if front is None or back is None:
-        missing = "front" if front is None else "back"
-        return BroadsideFix(ok=False, reason=f"no wall cluster found for {missing} (occluded, or thresholds too tight)")
+    if front is None:
+        return BroadsideFix(ok=False, reason="no wall cluster found for front (occluded, or thresholds too tight)")
 
     # line_distance_mm is the perpendicular distance from the LIDAR's own
     # origin to the fitted wall line -- apply the forward lever-arm offset.
-    # If the LIDAR sits FORWARD_MM ahead of the reference point, the true
-    # distance from the reference point to the front wall is larger by that
-    # amount, and to the back wall smaller by that amount.
     offset = config.LIDAR_OFFSET_FORWARD_MM
     front_d = front.line_distance_mm + offset
-    back_d = back.line_distance_mm - offset
 
-    lane_sum = front_d + back_d
-    if abs(lane_sum - geo.LANE_WIDTH_MM) > config.LANE_WIDTH_TOLERANCE_MM:
+    # Back is no longer independently read. On real hardware, most of the
+    # LIDAR's rear is permanently blocked by the robot's own chassis -- a
+    # ~105deg dead zone centred almost exactly on 180deg robot-relative,
+    # confirmed against a real scan, present regardless of where on the mat
+    # the robot is (see README's "Back reading dropped" section). Inferred
+    # instead: front+back == LANE_WIDTH_MM by definition of the lane, so
+    # back_d = LANE_WIDTH_MM - front_d. This trades away the old front+back
+    # cross-check -- it would now always trivially pass, since back is
+    # DEFINED from front rather than independently measured -- for a
+    # plausibility bound on front_d instead: a genuine outer-wall reading
+    # has to land inside the lane.
+    back_d = geo.LANE_WIDTH_MM - front_d
+    if not (-config.LANE_WIDTH_TOLERANCE_MM < front_d < geo.LANE_WIDTH_MM + config.LANE_WIDTH_TOLERANCE_MM):
         return BroadsideFix(ok=False, reason=(
-            f"front+back = {lane_sum:.0f}mm, expected {geo.LANE_WIDTH_MM:.0f}mm "
-            f"+/- {config.LANE_WIDTH_TOLERANCE_MM:.0f} -- likely a pillar or corner "
-            f"return mistaken for a wall"),
-            front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=lane_sum)
+            f"front={front_d:.0f}mm is outside the lane (0..{geo.LANE_WIDTH_MM:.0f}mm, "
+            f"+/- {config.LANE_WIDTH_TOLERANCE_MM:.0f} noise margin) -- can't be a genuine "
+            f"outer-wall reading, likely a pillar or corner return mistaken for a wall"),
+            front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=front_d + back_d)
 
     return BroadsideFix(
         ok=True,
         front_distance_mm=front_d,
-        back_distance_mm=back_d,
-        lane_sum_mm=lane_sum,
+        back_distance_mm=back_d,   # inferred, not measured -- see comment above
+        lane_sum_mm=front_d + back_d,   # == LANE_WIDTH_MM always now; kept for API/dashboard shape
         lateral_from_outer_mm=front_d,
         front_flatness_mm=front.flatness_residual_mm,
-        back_flatness_mm=back.flatness_residual_mm,
+        back_flatness_mm=None,   # no longer measured
     )
 
 
@@ -168,31 +183,23 @@ def compute_start_of_run_fix(clusters: list[Cluster]) -> StartOfRunFix:
     left/right shift does. (Symmetric to compute_broadside_fix, which
     only needs _FORWARD_MM for the same reason, just on the other axis.)
 
-    FOUND DURING TESTING, READ THIS BEFORE TRUSTING A STARTING along_mm:
-    this needs a noticeably wider safety margin from BOTH corners than
-    mat_geometry.SAFE_FIX_ALONG_MIN/MAX_MM (which only covers the back
-    ray missing the island) -- and, unlike that one, the workable window
-    isn't just "near the middle": simulation sweeps at various lateral
-    offsets found it can be a few hundred mm wide, well off-centre, or
-    (at some lateral values) not open anywhere in the section. The
-    mechanism: the near/far OUTER corners are real sharp 90-degree
-    corners too, same as the island's, so a side ray taken close enough
-    to one blends the perpendicular wall and the along-track wall into
-    one continuously-curving return -- clustering (correctly) refuses to
-    call that flat, and this fix (correctly) rejects it rather than
-    guessing -- but it means "front+back+left+right all resolve
-    cleanly" is a narrower, less predictable target than "just avoid the
-    island margin". Verify the workable range for your own robot's
-    geometry (dashboard_server.py overrides the mock demo's default
-    along_mm for exactly this reason) rather than assuming any particular
-    along/lateral combination will work.
+    Back is inferred from front, not independently read -- see the
+    comment in compute_broadside_fix. That also changes what "narrow
+    safe start window" meant in earlier testing: the along-track window
+    used to be constrained by BOTH the back ray's and a side ray's
+    corner-blending risk at once (see mat_geometry.py's note on why a
+    back ray near a corner sails past the island). With back no longer
+    read at all, only the front and the two side rays need to avoid
+    corner-blending, which is a real but smaller constraint -- re-verify
+    against your own geometry if you rely on a specific starting spot;
+    don't assume the old narrow numbers still apply as-is now that one
+    of the four requirements is gone.
     """
     front = _find_wall_near(clusters, 0.0, config.FRONT_BACK_SEARCH_WINDOW_DEG)
-    back = _find_wall_near(clusters, 180.0, config.FRONT_BACK_SEARCH_WINDOW_DEG)
     left = _find_wall_near(clusters, 90.0, config.SIDE_SEARCH_WINDOW_DEG)
     right = _find_wall_near(clusters, 270.0, config.SIDE_SEARCH_WINDOW_DEG)
 
-    missing = [name for name, c in (("front", front), ("back", back), ("left", left), ("right", right)) if c is None]
+    missing = [name for name, c in (("front", front), ("left", left), ("right", right)) if c is None]
     if missing:
         return StartOfRunFix(ok=False, reason=(
             f"no wall cluster found for {', '.join(missing)} (occluded, or thresholds too tight)"))
@@ -201,13 +208,12 @@ def compute_start_of_run_fix(clusters: list[Cluster]) -> StartOfRunFix:
     lat_offset = config.LIDAR_OFFSET_LATERAL_MM
 
     front_d = front.line_distance_mm + fwd_offset
-    back_d = back.line_distance_mm - fwd_offset
-    lane_sum = front_d + back_d
-    if abs(lane_sum - geo.LANE_WIDTH_MM) > config.LANE_WIDTH_TOLERANCE_MM:
+    back_d = geo.LANE_WIDTH_MM - front_d   # inferred, see compute_broadside_fix
+    if not (-config.LANE_WIDTH_TOLERANCE_MM < front_d < geo.LANE_WIDTH_MM + config.LANE_WIDTH_TOLERANCE_MM):
         return StartOfRunFix(ok=False, reason=(
-            f"front+back = {lane_sum:.0f}mm, expected {geo.LANE_WIDTH_MM:.0f}mm "
-            f"+/- {config.LANE_WIDTH_TOLERANCE_MM:.0f} -- likely a pillar or corner return mistaken for a wall"),
-            front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=lane_sum)
+            f"front={front_d:.0f}mm is outside the lane (0..{geo.LANE_WIDTH_MM:.0f}mm, "
+            f"+/- {config.LANE_WIDTH_TOLERANCE_MM:.0f} noise margin)"),
+            front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=front_d + back_d)
 
     # Raw, uncorrected -- the lateral offset cancels out of this sum (any
     # point between two parallel walls has front+back-style distances that
@@ -220,7 +226,7 @@ def compute_start_of_run_fix(clusters: list[Cluster]) -> StartOfRunFix:
         return StartOfRunFix(ok=False, reason=(
             f"left+right = {section_length_sum:.0f}mm, expected {geo.OUTER_SIZE_MM:.0f}mm "
             f"+/- {config.SECTION_LENGTH_TOLERANCE_MM:.0f} -- likely a pillar blocking one of the side rays"),
-            front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=lane_sum,
+            front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=front_d + back_d,
             left_distance_mm=left_d_raw, right_distance_mm=right_d_raw, section_length_sum_mm=section_length_sum)
 
     along_from_right = right_d_raw - lat_offset
@@ -229,7 +235,7 @@ def compute_start_of_run_fix(clusters: list[Cluster]) -> StartOfRunFix:
 
     return StartOfRunFix(
         ok=True,
-        front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=lane_sum,
+        front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=front_d + back_d,
         left_distance_mm=left_d_raw, right_distance_mm=right_d_raw, section_length_sum_mm=section_length_sum,
         lateral_from_outer_mm=front_d,
         along_mm=along, along_mm_from_left=along_from_left, along_mm_from_right=along_from_right,
@@ -335,7 +341,17 @@ class PoseEstimator:
         sail past its corner (see the note by SAFE_FIX_ALONG_MIN/MAX_MM in
         mat_geometry.py). Check this before calling apply_lidar_fix -- don't
         attempt a fix right at a corner-turn completion, it will usually
-        just fail the lane-width sanity check rather than succeed."""
+        just fail the lane-width sanity check rather than succeed.
+
+        NOTE: back is no longer independently read (see module docstring),
+        so this specific rationale -- the back ray sailing past the
+        island's corner -- no longer strictly applies to compute_broadside_fix,
+        which only reads front now. Left in place as a conservative gate
+        rather than removed outright, since front's own cluster can still
+        get corner-blended with a side wall close enough to a corner (the
+        same effect documented for compute_start_of_run_fix) and that
+        hasn't been specifically characterised as safe to skip. Worth
+        re-testing if you want fixes available closer to a corner-turn."""
         return geo.SAFE_FIX_ALONG_MIN_MM <= self.state.along_mm <= geo.SAFE_FIX_ALONG_MAX_MM
 
     def apply_lidar_fix(self, clusters: list[Cluster]) -> BroadsideFix:
