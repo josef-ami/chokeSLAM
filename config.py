@@ -38,14 +38,17 @@ FRONT_BACK_SEARCH_WINDOW_DEG = 15.0     # how far from 0 deg / 180 deg (robot-re
                                          # nearby corner (see mat_geometry.SAFE_FIX_*_MM) and picking up the wrong,
                                          # much farther surface -- found during testing, not theoretical.
 
-# --- Start-of-run along-track fix (left/right, 90/270 deg robot-relative) --
-# Only used once, at the very start of the run, to resolve along-track
-# position from the two side rays -- see localization.compute_start_of_run_fix().
-SIDE_SEARCH_WINDOW_DEG = 15.0           # same idea as FRONT_BACK_SEARCH_WINDOW_DEG, for the 90/270 deg rays
-SECTION_LENGTH_TOLERANCE_MM = 60.0      # left+right distance sanity check: |sum - OUTER_SIZE_MM| must be under
-                                         # this. Wider than LANE_WIDTH_TOLERANCE_MM since the rays travel much
-                                         # farther (up to ~3000mm vs ~1000mm), so the same angular/range noise
-                                         # translates into a bigger absolute error at the far end.
+# --- Start-of-run fix (robot along the lane, facing direction of travel) ---
+# Used once at the very start. The two side rays (90 deg = left, 270 deg =
+# right) hit the outer + inner lane walls -> cross-lane position; the forward
+# ray (0 deg) -> along-track. See localization.compute_start_of_run_fix().
+SIDE_SEARCH_WINDOW_DEG = 15.0           # how far from 90/270 deg to look for each lane-wall cluster.
+# The two side walls must sum to ~LANE_WIDTH_MM (the lane's fixed width); that
+# check reuses LANE_WIDTH_TOLERANCE_MM above. (SECTION_LENGTH_TOLERANCE_MM
+# below is unused now -- it belonged to the old broadside start assumption
+# where the side rays ran to the far corners and summed to OUTER_SIZE_MM;
+# kept only so an external reference to it doesn't break.)
+SECTION_LENGTH_TOLERANCE_MM = 60.0      # DEPRECATED / unused (see note above)
 
 # --- Rear chassis blind arc (for the predicted-scan overlay) --------------
 # On real hardware a wedge of the LIDAR's view centred on the robot's rear is

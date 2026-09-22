@@ -53,9 +53,10 @@
 
     <h1 style="margin-top:18px">START-OF-RUN FIX (one-time)</h1>
     <div class="row"><span>status</span><span id="startFixStatus">-</span></div>
-    <div class="row"><span>left / right (mm)</span><span id="startLeftRight">-</span></div>
-    <div class="row"><span>sum (expect ~3000)</span><span id="startSectionSum">-</span></div>
-    <div class="row"><span>along_mm (from left / right)</span><span id="startAlong">-</span></div>
+    <div class="row"><span>left / right walls (mm)</span><span id="startLeftRight">-</span></div>
+    <div class="row"><span>lane sum (expect ~1000)</span><span id="startLaneSum">-</span></div>
+    <div class="row"><span>forward 0&deg; (mm)</span><span id="startForward">-</span></div>
+    <div class="row"><span>lateral (from outer) / along</span><span id="startLatAlong">-</span></div>
     <div id="startReason"></div>
 
     <h1 style="margin-top:18px">START CANDIDATES (4 legs &times; 2 axes)</h1>
@@ -65,7 +66,7 @@
       <div><span class="dot" style="background:var(--wallpt)"></span>wall points</div>
       <div><span class="dot" style="background:var(--pillarpt)"></span>pillar points</div>
       <div><span class="dot" style="background:var(--unpt)"></span>unclassified</div>
-      <div><span class="dot" style="background:var(--candidate)"></span>start candidates: each leg has a colour; arrow + matching dots = its predicted LIDAR (solid=broadside, dashed=+90&deg;)</div>
+      <div><span class="dot" style="background:var(--candidate)"></span>start candidates: each leg has a colour; arrow + matching dots = its predicted LIDAR (solid=driving heading, dashed=+90&deg;)</div>
     </div>
   </div>
 </div>
@@ -227,7 +228,7 @@ function renderCandidateTable(candidates) {
   let html = '';
   for (const c of candidates) {
     const col = candColor(c.idx);
-    const variant = c.heading_variant === 'secondary' ? '+90°' : 'broadside';
+    const variant = c.heading_variant === 'secondary' ? '+90°' : 'driving';
     html += `<div class="cand-row">`
       + `<span class="cand-sw" style="background:${col}"></span>`
       + `<span class="cand-tag">${candLabel(c)}</span>`
@@ -266,8 +267,9 @@ function render(state) {
   if (sfix) {
     sbadge.innerHTML = `<span class="badge ${sfix.ok ? 'ok' : 'bad'}">${sfix.ok ? 'OK' : 'REJECTED'}</span>`;
     setText('startLeftRight', (sfix.left_mm ?? '-') + ' / ' + (sfix.right_mm ?? '-'));
-    setText('startSectionSum', sfix.section_length_sum_mm ?? '-');
-    setText('startAlong', `${sfix.along_mm ?? '-'} (${sfix.along_mm_from_left ?? '-'} / ${sfix.along_mm_from_right ?? '-'})`);
+    setText('startLaneSum', sfix.lane_sum_mm ?? '-');
+    setText('startForward', sfix.forward_mm ?? '-');
+    setText('startLatAlong', `${sfix.lateral_mm ?? '-'} / ${sfix.along_mm ?? '-'}`);
     setText('startReason', sfix.reason || '');
   }
 

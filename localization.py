@@ -133,125 +133,146 @@ def compute_broadside_fix(clusters: list[Cluster], heading_deg: float, section: 
     )
 
 
+def _forward_range_mm(clusters: list[Cluster], window_deg: float) -> float | None:
+    """Range of the ray pointing straight down the lane (0 deg robot-relative,
+    the direction of travel). Unlike the side rays this is NOT taken from a
+    fitted wall -- straight ahead the robot is usually looking down the lane
+    at the far corner, where the return is a corner-blend (curved, rejected by
+    the wall classifier), not a flat wall. What we actually want is just the
+    RANGE dead-ahead, so take the median distance of the raw points closest to
+    0 deg (within +/- a few degrees), which is robust to that corner-blend and
+    to the odd dropout. Returns None if nothing is seen forward at all."""
+    near0 = []
+    for c in clusters:
+        for p in c.points:
+            da = abs((p.angle_deg + 180.0) % 360.0 - 180.0)  # angular dist to 0 deg
+            if da <= window_deg:
+                near0.append((da, p.dist_mm))
+    if not near0:
+        return None
+    near0.sort()
+    tight = [d for da, d in near0 if da <= 5.0] or [d for _, d in near0[:5]]
+    tight.sort()
+    return tight[len(tight) // 2]  # median of the dead-ahead points
+
+
 @dataclass
 class StartOfRunFix:
-    """Result of the ONE-TIME start-of-run reading: uses all four cardinal
-    robot-relative directions (front=0, back=180, left=90, right=270) to
-    resolve BOTH lateral (cross-lane) and along-track position, without
-    assuming which of the 4 sections the robot is on.
+    """Result of the ONE-TIME start-of-run reading, taken with the robot
+    stationary in its real start orientation: PARALLEL TO THE WALLS, FACING
+    THE DIRECTION OF TRAVEL (down the lane). NOT broadside -- an earlier
+    version assumed the robot faced the outer wall, which put the side rays
+    down the lane (expecting left+right ~ 3000mm); on the real robot the
+    start orientation is along-the-lane, so the side rays instead hit the two
+    lane walls ~1000mm apart. See the module docstring / README.
 
-    Deliberately separate from BroadsideFix/compute_broadside_fix (which
-    needs a known `section` to check heading against, and which is what
-    every RE-fix after a corner turn keeps using): at true start-of-run we
-    don't have a section yet -- that's exactly what we can't resolve here
-    (see module docstring) -- so there's no specific target heading to
-    check against either. This trusts your team's placement procedure
-    (robot stationary, parallel to the inner wall, facing the outer wall)
-    rather than gating on IMU heading."""
+    In this orientation:
+      - the two side rays (90 deg = left, 270 deg = right) hit the OUTER and
+        INNER lane walls, so they resolve CROSS-LANE (lateral) position and
+        sum to ~LANE_WIDTH_MM (not the section length);
+      - the forward ray (0 deg, down the lane) gives range to the wall ahead,
+        which resolves ALONG-TRACK position.
+    Which of left/right is the OUTER wall depends only on the driving
+    direction (CCW keeps the outer wall on one hand, CW the other) -- not on
+    which leg -- so lateral is resolved without knowing the leg. WHICH of the
+    4 legs is still unresolvable from LIDAR alone (see module docstring) --
+    candidate_start_positions() enumerates all 4."""
     ok: bool
     reason: str = ""
-    front_distance_mm: float | None = None
-    back_distance_mm: float | None = None
-    lane_sum_mm: float | None = None
-    left_distance_mm: float | None = None
-    right_distance_mm: float | None = None
-    section_length_sum_mm: float | None = None
-    lateral_from_outer_mm: float | None = None
-    along_mm: float | None = None              # resolved along-track position (averaged)
-    along_mm_from_left: float | None = None    # diagnostic: independent estimate from the left (90deg) ray
-    along_mm_from_right: float | None = None   # diagnostic: independent estimate from the right (270deg) ray
+    forward_distance_mm: float | None = None   # 0deg range down the lane
+    left_distance_mm: float | None = None      # 90deg wall (perpendicular distance)
+    right_distance_mm: float | None = None     # 270deg wall
+    lane_sum_mm: float | None = None           # left+right, expected ~LANE_WIDTH_MM
+    lateral_from_outer_mm: float | None = None # resolved cross-lane position
+    along_mm: float | None = None              # resolved along-track position
 
 
-def compute_start_of_run_fix(clusters: list[Cluster]) -> StartOfRunFix:
-    """Call once, at the very start of the run, with the robot stationary
-    and already placed broadside per your team's start procedure.
+def compute_start_of_run_fix(clusters: list[Cluster], driving_direction: str = "CCW") -> StartOfRunFix:
+    """Call once, at the very start of the run, with the robot stationary and
+    placed in its real start orientation: parallel to the walls, facing the
+    direction of travel (down the lane). `driving_direction` ("CCW"/"CW") is
+    the randomised round direction your team supplies -- it fixes which hand
+    the outer wall is on.
 
-    Along-track derivation: for EVERY one of the 4 sections (verified
-    against mat_geometry._section_axes), a broadside robot's LEFT side
-    (90 deg robot-relative) points toward the far corner of whichever
-    section it's on (increasing along_mm), and its RIGHT side (270 deg)
-    points toward the near corner (along_mm=0) -- because "left"/"right"
-    for a broadside robot are exactly the section's own along-track axis.
-    So the same formula resolves along_mm regardless of which of the 4
-    legs the robot is actually on; it just can't tell you WHICH leg (see
-    module docstring) -- use candidate_start_positions() for that part.
+    Geometry (verified against the simulator on all 4 legs, both directions):
+      - lateral (cross-lane) comes from the two side walls. CCW keeps the
+        OUTER wall on the LEFT (90 deg) and the inner wall on the RIGHT
+        (270 deg); CW is mirrored. left+right must sum to ~LANE_WIDTH_MM.
+      - along-track comes from the forward (0 deg) range down the lane:
+        CCW -> along = forward; CW -> along = OUTER_SIZE_MM - forward
+        (the robot faces opposite ends of the section in the two directions).
 
-    Offset correction: only LIDAR_OFFSET_LATERAL_MM matters here (not
-    _FORWARD_MM) -- config.py's comment on that field already flags this.
-    A forward/back shift of the sensor doesn't change its perpendicular
-    distance to a wall running parallel to the direction of travel; a
-    left/right shift does. (Symmetric to compute_broadside_fix, which
-    only needs _FORWARD_MM for the same reason, just on the other axis.)
-
-    Back is inferred from front, not independently read -- see the
-    comment in compute_broadside_fix. That also changes what "narrow
-    safe start window" meant in earlier testing: the along-track window
-    used to be constrained by BOTH the back ray's and a side ray's
-    corner-blending risk at once (see mat_geometry.py's note on why a
-    back ray near a corner sails past the island). With back no longer
-    read at all, only the front and the two side rays need to avoid
-    corner-blending, which is a real but smaller constraint -- re-verify
-    against your own geometry if you rely on a specific starting spot;
-    don't assume the old narrow numbers still apply as-is now that one
-    of the four requirements is gone.
+    Offset correction: LIDAR_OFFSET_LATERAL_MM shifts the side (cross-lane)
+    reads; LIDAR_OFFSET_FORWARD_MM shifts the forward (along-track) read.
     """
-    front = _find_wall_near(clusters, 0.0, config.FRONT_BACK_SEARCH_WINDOW_DEG)
+    if driving_direction not in ("CCW", "CW"):
+        return StartOfRunFix(ok=False, reason=f"bad driving_direction {driving_direction!r} (want CCW/CW)")
+
     left = _find_wall_near(clusters, 90.0, config.SIDE_SEARCH_WINDOW_DEG)
     right = _find_wall_near(clusters, 270.0, config.SIDE_SEARCH_WINDOW_DEG)
-
-    missing = [name for name, c in (("front", front), ("left", left), ("right", right)) if c is None]
+    missing = [name for name, c in (("left(90)", left), ("right(270)", right)) if c is None]
     if missing:
         return StartOfRunFix(ok=False, reason=(
-            f"no wall cluster found for {', '.join(missing)} (occluded, or thresholds too tight)"))
+            f"no wall cluster found for {', '.join(missing)} -- the two lane walls should be "
+            f"~{geo.LANE_WIDTH_MM:.0f}mm apart on the robot's sides; occluded, or the robot "
+            f"isn't parallel to the walls (facing the direction of travel)"))
 
-    fwd_offset = config.LIDAR_OFFSET_FORWARD_MM
     lat_offset = config.LIDAR_OFFSET_LATERAL_MM
-
-    front_d = front.line_distance_mm + fwd_offset
-    back_d = geo.LANE_WIDTH_MM - front_d   # inferred, see compute_broadside_fix
-    if not (-config.LANE_WIDTH_TOLERANCE_MM < front_d < geo.LANE_WIDTH_MM + config.LANE_WIDTH_TOLERANCE_MM):
+    fwd_offset = config.LIDAR_OFFSET_FORWARD_MM
+    left_d = left.line_distance_mm
+    right_d = right.line_distance_mm
+    lane_sum = left_d + right_d
+    # The lateral offset cancels out of this sum (two parallel walls a fixed
+    # gap apart), so the sanity check doesn't need it.
+    if abs(lane_sum - geo.LANE_WIDTH_MM) > config.LANE_WIDTH_TOLERANCE_MM:
         return StartOfRunFix(ok=False, reason=(
-            f"front={front_d:.0f}mm is outside the lane (0..{geo.LANE_WIDTH_MM:.0f}mm, "
-            f"+/- {config.LANE_WIDTH_TOLERANCE_MM:.0f} noise margin)"),
-            front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=front_d + back_d)
+            f"left+right = {lane_sum:.0f}mm, expected the lane width ~{geo.LANE_WIDTH_MM:.0f}mm "
+            f"+/- {config.LANE_WIDTH_TOLERANCE_MM:.0f}. If it's ~{geo.OUTER_SIZE_MM:.0f}mm the robot is "
+            f"broadside (facing the outer wall) instead of along the lane; if it's way off, a pillar is "
+            f"blocking a side ray"),
+            left_distance_mm=left_d, right_distance_mm=right_d, lane_sum_mm=lane_sum)
 
-    # Raw, uncorrected -- the lateral offset cancels out of this sum (any
-    # point between two parallel walls has front+back-style distances that
-    # sum to the fixed gap between them, regardless of exactly where on
-    # that line the point sits), so this check doesn't need lat_offset.
-    left_d_raw = left.line_distance_mm
-    right_d_raw = right.line_distance_mm
-    section_length_sum = left_d_raw + right_d_raw
-    if abs(section_length_sum - geo.OUTER_SIZE_MM) > config.SECTION_LENGTH_TOLERANCE_MM:
-        return StartOfRunFix(ok=False, reason=(
-            f"left+right = {section_length_sum:.0f}mm, expected {geo.OUTER_SIZE_MM:.0f}mm "
-            f"+/- {config.SECTION_LENGTH_TOLERANCE_MM:.0f} -- likely a pillar blocking one of the side rays"),
-            front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=front_d + back_d,
-            left_distance_mm=left_d_raw, right_distance_mm=right_d_raw, section_length_sum_mm=section_length_sum)
+    forward = _forward_range_mm(clusters, config.FRONT_BACK_SEARCH_WINDOW_DEG)
+    if forward is None:
+        return StartOfRunFix(ok=False, reason="nothing seen forward (0 deg) -- can't resolve along-track position",
+                             left_distance_mm=left_d, right_distance_mm=right_d, lane_sum_mm=lane_sum)
+    forward += fwd_offset
 
-    along_from_right = right_d_raw - lat_offset
-    along_from_left = geo.OUTER_SIZE_MM - left_d_raw - lat_offset
-    along = (along_from_right + along_from_left) / 2.0
+    # CCW: outer wall on the LEFT; along = forward.  CW mirrors both.
+    if driving_direction == "CCW":
+        lateral_from_outer = left_d - lat_offset
+        along = forward
+    else:
+        lateral_from_outer = right_d - lat_offset
+        along = geo.OUTER_SIZE_MM - forward
 
     return StartOfRunFix(
         ok=True,
-        front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=front_d + back_d,
-        left_distance_mm=left_d_raw, right_distance_mm=right_d_raw, section_length_sum_mm=section_length_sum,
-        lateral_from_outer_mm=front_d,
-        along_mm=along, along_mm_from_left=along_from_left, along_mm_from_right=along_from_right,
+        forward_distance_mm=forward,
+        left_distance_mm=left_d, right_distance_mm=right_d, lane_sum_mm=lane_sum,
+        lateral_from_outer_mm=lateral_from_outer, along_mm=along,
     )
+
+
+def driving_heading_deg(section: geo.Section, driving_direction: str) -> float:
+    """The heading a robot faces while DRIVING along `section` in
+    `driving_direction` -- i.e. facing the direction of travel, parallel to
+    the walls. This is the section's broadside heading (facing the outer wall)
+    rotated -90 deg for CCW / +90 deg for CW, matching the simulator's
+    true_heading_deg and verified against the along-lane scan geometry."""
+    broadside = geo.BROADSIDE_HEADING_DEG[section]
+    return (broadside - 90.0) % 360.0 if driving_direction == "CCW" else (broadside + 90.0) % 360.0
 
 
 @dataclass
 class CandidatePose:
     """One of the possible global poses for the start-of-run fix. `section`
     is which of the 4 legs this candidate assumes. `heading_variant` is
-    "primary" (that section's real broadside heading -- a genuine, valid
-    broadside solution IF this is the right section) or "secondary" (the
-    same point rotated +90 deg, shown only because you asked for both a
-    north-south- and east-west-facing marker at every candidate -- this is
-    NOT a physically valid broadside reading at this point, it's a visual
-    reference only)."""
+    "primary" (that leg's real DRIVING heading -- facing the direction of
+    travel, the genuine solution IF this is the right leg) or "secondary"
+    (the same point rotated +90 deg, shown only because you asked for a
+    marker on both axes at every candidate -- a visual reference, not a
+    physically valid start heading here)."""
     section: geo.Section
     heading_variant: str
     x_mm: float
@@ -259,17 +280,18 @@ class CandidatePose:
     heading_deg: float
 
 
-def candidate_start_positions(along_mm: float, lateral_mm: float) -> list[CandidatePose]:
-    """Expands one (along_mm, lateral_mm) pair -- section-independent, from
+def candidate_start_positions(along_mm: float, lateral_mm: float,
+                              driving_direction: str = "CCW") -> list[CandidatePose]:
+    """Expands one (along_mm, lateral_mm) pair -- leg-independent, from
     compute_start_of_run_fix() -- into all 8 candidate global poses: one
-    "primary" (true broadside heading) and one "secondary" (+90 deg from
-    primary, purely for the both-axes display) for each of the 4 sections.
-    Which one (if any) matches reality still has to come from your team
-    (e.g. watching the referee place the robot) -- see module docstring."""
+    "primary" (the leg's real driving heading) and one "secondary" (+90 deg
+    from primary, for the both-axes display) for each of the 4 legs. Which
+    one (if any) matches reality still has to come from your team (e.g.
+    watching the referee place the robot) -- see module docstring."""
     out: list[CandidatePose] = []
     for section in ("S", "E", "N", "W"):
         x, y = geo.local_to_global(section, along_mm, lateral_mm)
-        primary_heading = geo.BROADSIDE_HEADING_DEG[section]
+        primary_heading = driving_heading_deg(section, driving_direction)
         out.append(CandidatePose(section=section, heading_variant="primary",
                                   x_mm=x, y_mm=y, heading_deg=primary_heading))
         out.append(CandidatePose(section=section, heading_variant="secondary",

@@ -178,16 +178,42 @@ figures, not measured on your unit. Predictions are static (they depend only on
 the fixed candidate poses), so they're computed once at start-of-run and reused
 every frame -- not re-ray-cast at stream rate.
 
-**The candidates only appear when the start-of-run fix SUCCEEDS, which requires
-a genuine broadside placement** (robot stationary, parallel to the inner wall,
-facing the outer wall). If the one-time scan is taken while the robot is
-pointing *along* the lane, the fix rejects with "no wall cluster found for
-front" -- front (0 deg) sees a corner down the lane instead of the outer wall,
-and the two side rays see the ~1000 mm-apart lane walls instead of the far
-corners that should sum to ~3000 mm. No LIDAR angle calibration can fix that
-particular scan (rotating angle labels can't turn 1000 mm-apart walls into
-3000 mm-apart corners); the robot has to actually be broadside for the one-time
-reading. Place it broadside, or take the reading before it starts driving.
+### Start orientation: along the lane, facing the direction of travel
+
+The one-time start-of-run scan is taken with the robot in its REAL start
+orientation: **parallel to the walls, facing the direction of travel** (down
+the lane) -- NOT broadside. `compute_start_of_run_fix(clusters,
+driving_direction)` resolves position from that view:
+
+- The two **side rays** (90 deg = left, 270 deg = right) hit the OUTER and
+  INNER lane walls, so they give the **cross-lane** position and sum to
+  ~`LANE_WIDTH_MM` (~1000 mm). Which side is the outer wall is fixed by the
+  driving direction, not the leg: **CCW keeps the outer wall on the left**
+  (90 deg), CW on the right (270 deg).
+- The **forward ray** (0 deg, straight down the lane) gives the range to the
+  wall ahead, which resolves **along-track**: CCW -> `along = forward`,
+  CW -> `along = OUTER_SIZE_MM - forward`. Forward is taken as the median
+  range of the dead-ahead points (not a fitted wall), since straight down the
+  lane the return is usually a corner-blend, not a flat wall.
+
+Then `candidate_start_positions(along, lateral, driving_direction)` places all
+4 legs, each facing its **driving heading** (`driving_heading_deg()` -- the
+leg's broadside heading rotated -/+90 deg), plus the +90 deg variant.
+
+This replaces an earlier version that assumed the robot faced the OUTER WALL
+(broadside) at start, which put the side rays down the lane and expected
+left+right ~= `OUTER_SIZE_MM` (~3000 mm). On the real robot the start
+orientation is along-the-lane, so that version rejected every real scan with
+"no wall cluster found for front". If the fix now reports
+`left+right ~= 3000` it means the robot is broadside instead of along the
+lane; ~1000 is the along-lane orientation it expects.
+
+**Valid start zone (unchanged constraint):** the island only faces the middle
+~1000-2000 mm of each 3000 mm edge, so the cross-lane fix only works when the
+robot starts in that middle band -- outside it, a side ray sails past the
+island's corner to a far wall and the lane-width check fails (correctly). You
+said the robot always starts in a working position; this is what "working"
+means geometrically.
 
 ## Findings from actually building and testing this (read this part)
 
