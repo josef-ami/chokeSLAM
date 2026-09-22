@@ -215,6 +215,36 @@ island's corner to a far wall and the lane-width check fails (correctly). You
 said the robot always starts in a working position; this is what "working"
 means geometrically.
 
+## Editable dashboard (live tuning + pose)
+
+The dashboard's **TUNING PARAMETERS** panel is fully editable at runtime -- no
+restart, no file edits. Every tuning constant (config.py, mat_geometry.py,
+scan_processing.py) and the live pose-estimation state are exposed as inputs
+that POST to the running server:
+
+- `GET /api/tuning` builds the panel from a registry that reads each value
+  live; `POST /api/param {name, value}` applies one edit; `POST /api/refit`
+  re-takes the start-of-run scan and rebuilds the fix + candidates + predicted
+  overlay with the current parameters; `POST /api/reset` restores the file
+  defaults captured at startup.
+- **Live vs re-run:** calibration (`LIDAR_ANGLE_*`) and clustering
+  (scan_processing) edits show up on the *next frame* -- watch the point cloud
+  rotate / re-classify as you type. The start-of-run candidates are static, so
+  click **Re-run start-of-run fix** to rebuild them after changing anything
+  that affects them (geometry, tolerances, blind arc, driving direction,
+  overlay density).
+- **Field geometry** edits (`OUTER_SIZE_MM`, `LANE_WIDTH_MM`,
+  `SAFE_FIX_MARGIN_MM`) re-derive the island + safe zone and redraw the mat;
+  the derived values are shown read-only.
+- **Pose estimate (live)** lets you set the estimator's `section`, `along_mm`,
+  `lateral_mm`, `heading_deg` directly. In mock mode the simulator overwrites
+  these every frame unless you tick `freeze_pose` (in real mode nothing feeds
+  the estimator here, so edits stick).
+- `MODE`, `DASHBOARD_HOST/PORT` are read-only (they need a restart to rebind).
+
+These are debug controls on a single-viewer local dashboard -- there's no
+auth; don't expose the port beyond your bench network.
+
 ## Findings from actually building and testing this (read this part)
 
 A few things surfaced only once this got implemented and stress-tested in

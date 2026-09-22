@@ -47,6 +47,17 @@
   .tparam-val { color: var(--ok); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .tparam-imp { font-size: 11px; color: var(--muted); margin-top: 2px; }
   .crit-badge { display: inline-block; font-size: 9px; font-weight: 700; color: var(--bad); border: 1px solid var(--bad); border-radius: 3px; padding: 0 3px; margin-left: 6px; vertical-align: middle; }
+  .tedit { width: 96px; background: #0b0f18; color: var(--ink); border: 1px solid #2e3a55; border-radius: 5px; padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+  select.tedit { text-align: left; width: 108px; }
+  .tedit:focus { outline: none; border-color: var(--wallpt); }
+  .tedit.okflash { border-color: var(--ok); box-shadow: 0 0 0 2px rgba(62,207,142,.25); }
+  .tedit.badflash { border-color: var(--bad); box-shadow: 0 0 0 2px rgba(229,85,107,.3); }
+  .tedit-chk { width: 16px; height: 16px; accent-color: var(--wallpt); }
+  .tcontrols { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0 2px; }
+  .tbtn { background: #1c2740; color: var(--ink); border: 1px solid #2e3a55; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .tbtn:hover { border-color: var(--wallpt); }
+  .tbtn.primary { background: rgba(90,169,255,.15); border-color: var(--wallpt); color: var(--wallpt); }
+  #tstatus { font-size: 11px; color: var(--muted); margin-left: auto; }
 </style>
 </head>
 <body>
@@ -296,35 +307,106 @@ function render(state) {
   renderCandidateTable(state.start_candidates);
 }
 
+function escAttr(v) { return String(v).replace(/"/g, '&quot;'); }
+
+async function postJSON(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  return r.json();
+}
+function tstatus(msg, bad) {
+  const el = document.getElementById('tstatus');
+  if (el) { el.textContent = msg; el.style.color = bad ? '#e5556b' : '#8993a8'; }
+}
+
+function tControl(p) {
+  const dn = `data-name="${escAttr(p.name)}" data-kind="${p.kind}" ${p.geo ? 'data-geo="1"' : ''}`;
+  if (!p.editable) {
+    const val = (p.value === null || p.value === undefined || p.value === '') ? '—' : p.value;
+    return `<span class="tparam-val">${val}${p.unit ? (' ' + p.unit) : ''}</span>`;
+  }
+  if (p.kind === 'bool') {
+    return `<input class="tedit-chk tedit" type="checkbox" ${dn} ${p.value ? 'checked' : ''}>`;
+  }
+  if (p.kind === 'enum' || (p.options && p.options.length)) {
+    const opts = (p.options || []).map(o => `<option value="${escAttr(o)}" ${String(o) === String(p.value) ? 'selected' : ''}>${o}</option>`).join('');
+    return `<select class="tedit" ${dn}>${opts}</select>`;
+  }
+  const step = (p.kind === 'int') ? '1' : 'any';
+  const v = (p.value === null || p.value === undefined) ? '' : p.value;
+  return `<input class="tedit" type="number" step="${step}" ${dn} value="${escAttr(v)}">`;
+}
+
 function renderTuning(groups) {
   const body = document.getElementById('tuningBody');
-  let html = '';
+  let html = '<div class="tcontrols">'
+    + '<button class="tbtn primary" id="btnRefit">Re-run start-of-run fix</button>'
+    + '<button class="tbtn" id="btnReset">Reset to file defaults</button>'
+    + '<span id="tstatus"></span></div>';
   for (const g of groups) {
     html += `<div class="tgroup"><div class="tgroup-h">${g.group}</div>`;
     if (g.note) html += `<div class="tgroup-note">${g.note}</div>`;
     for (const p of g.params) {
-      const val = (p.value === null || p.value === undefined || p.value === '') ? '—' : p.value;
-      const unit = p.unit ? (' ' + p.unit) : '';
       const badge = p.critical ? '<span class="crit-badge">must set</span>' : '';
       html += `<div class="tparam"><div class="tparam-top">`
-        + `<span class="tparam-name ${p.critical ? 'crit' : ''}">${p.name}${badge}</span>`
-        + `<span class="tparam-val">${val}${unit}</span></div>`
+        + `<span class="tparam-name ${p.critical ? 'crit' : ''}">${p.name}${p.unit ? ` <em style="opacity:.5;font-style:normal">(${p.unit})</em>` : ''}${badge}</span>`
+        + `${tControl(p)}</div>`
         + `<div class="tparam-imp">${p.implication}</div></div>`;
     }
     html += `</div>`;
   }
   body.innerHTML = html;
+
+  body.querySelectorAll('.tedit').forEach(el => el.addEventListener('change', onEdit));
+  document.getElementById('btnRefit').addEventListener('click', onRefit);
+  document.getElementById('btnReset').addEventListener('click', onReset);
 }
 
-async function init() {
-  const res = await fetch('/api/field');
-  field = await res.json();
-  drawField();
+async function onEdit(e) {
+  const el = e.target;
+  const name = el.dataset.name;
+  const value = (el.type === 'checkbox') ? el.checked : el.value;
+  try {
+    const res = await postJSON('/api/param', { name, value });
+    if (res.ok) {
+      el.classList.add('okflash'); setTimeout(() => el.classList.remove('okflash'), 700);
+      tstatus(`set ${name} = ${res.value}`);
+      if (el.dataset.geo) { await loadField(); await refreshTuning(); }
+    } else {
+      el.classList.add('badflash'); setTimeout(() => el.classList.remove('badflash'), 1200);
+      tstatus(res.error || 'error', true);
+    }
+  } catch (err) { tstatus(String(err), true); }
+}
 
+async function onRefit() {
+  tstatus('re-running fix…');
+  const res = await postJSON('/api/refit', {});
+  if (res.ok) tstatus(`fix OK: along=${(res.along_mm ?? 0).toFixed ? res.along_mm.toFixed(0) : res.along_mm}, lateral=${res.lateral_mm != null ? Math.round(res.lateral_mm) : '-'}`);
+  else tstatus('fix REJECTED: ' + (res.reason || ''), true);
+}
+
+async function onReset() {
+  const res = await postJSON('/api/reset', {});
+  tstatus(res.ok ? `reset ${res.restored} params to file defaults` : 'reset failed', !res.ok);
+  await loadField();
+  await refreshTuning();
+}
+
+async function refreshTuning() {
   try {
     const tune = await (await fetch('/api/tuning')).json();
     renderTuning(tune.groups);
-  } catch (e) { console.warn('tuning fetch failed', e); }
+  } catch (e) { console.warn('tuning refresh failed', e); }
+}
+
+async function loadField() {
+  field = await (await fetch('/api/field')).json();
+  drawField();
+}
+
+async function init() {
+  await loadField();
+  await refreshTuning();
 
   const es = new EventSource('/stream');
   es.onmessage = (ev) => {
