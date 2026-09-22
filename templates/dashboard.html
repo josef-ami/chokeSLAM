@@ -32,6 +32,21 @@
   .cand-xy { flex: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
   .cand-hd { color: var(--muted); font-variant-numeric: tabular-nums; }
   .cand-hd em { font-style: normal; opacity: .7; font-size: 11px; }
+  #tuningWrap { margin-top: 18px; }
+  #tuningWrap > summary { cursor: pointer; font-size: 16px; color: var(--muted); font-weight: 600; letter-spacing: .02em; list-style: none; }
+  #tuningWrap > summary::-webkit-details-marker { display: none; }
+  #tuningWrap > summary::before { content: '\25B8  '; }
+  #tuningWrap[open] > summary::before { content: '\25BE  '; }
+  .tgroup { margin-top: 12px; }
+  .tgroup-h { font-size: 12px; font-weight: 700; color: var(--ink); text-transform: uppercase; letter-spacing: .03em; }
+  .tgroup-note { font-size: 11px; color: var(--muted); margin: 2px 0 6px; }
+  .tparam { padding: 5px 0; border-bottom: 1px solid #232c40; }
+  .tparam-top { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; align-items: baseline; }
+  .tparam-name { color: var(--ink); font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .tparam-name.crit { color: var(--bad); }
+  .tparam-val { color: var(--ok); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tparam-imp { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .crit-badge { display: inline-block; font-size: 9px; font-weight: 700; color: var(--bad); border: 1px solid var(--bad); border-radius: 3px; padding: 0 3px; margin-left: 6px; vertical-align: middle; }
 </style>
 </head>
 <body>
@@ -68,6 +83,11 @@
       <div><span class="dot" style="background:var(--unpt)"></span>unclassified</div>
       <div><span class="dot" style="background:var(--candidate)"></span>start candidates: each leg has a colour; arrow + matching dots = its predicted LIDAR (solid=driving heading, dashed=+90&deg;)</div>
     </div>
+
+    <details id="tuningWrap">
+      <summary>TUNING PARAMETERS</summary>
+      <div id="tuningBody"></div>
+    </details>
   </div>
 </div>
 
@@ -276,10 +296,35 @@ function render(state) {
   renderCandidateTable(state.start_candidates);
 }
 
+function renderTuning(groups) {
+  const body = document.getElementById('tuningBody');
+  let html = '';
+  for (const g of groups) {
+    html += `<div class="tgroup"><div class="tgroup-h">${g.group}</div>`;
+    if (g.note) html += `<div class="tgroup-note">${g.note}</div>`;
+    for (const p of g.params) {
+      const val = (p.value === null || p.value === undefined || p.value === '') ? '—' : p.value;
+      const unit = p.unit ? (' ' + p.unit) : '';
+      const badge = p.critical ? '<span class="crit-badge">must set</span>' : '';
+      html += `<div class="tparam"><div class="tparam-top">`
+        + `<span class="tparam-name ${p.critical ? 'crit' : ''}">${p.name}${badge}</span>`
+        + `<span class="tparam-val">${val}${unit}</span></div>`
+        + `<div class="tparam-imp">${p.implication}</div></div>`;
+    }
+    html += `</div>`;
+  }
+  body.innerHTML = html;
+}
+
 async function init() {
   const res = await fetch('/api/field');
   field = await res.json();
   drawField();
+
+  try {
+    const tune = await (await fetch('/api/tuning')).json();
+    renderTuning(tune.groups);
+  } catch (e) { console.warn('tuning fetch failed', e); }
 
   const es = new EventSource('/stream');
   es.onmessage = (ev) => {

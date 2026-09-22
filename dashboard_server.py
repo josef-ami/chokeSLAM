@@ -27,6 +27,7 @@ import config
 import mat_geometry as geo
 from localization import (PoseEstimator, candidate_start_positions,
                            compute_start_of_run_fix)
+import scan_processing
 from scan_prediction import predict_scan_global
 from scan_processing import process_scan
 
@@ -34,6 +35,12 @@ app = Flask(__name__)
 
 _state_lock = threading.Lock()
 _latest_state: dict = {"ready": False}
+
+# Per-run settings, filled in when a mode loop starts, surfaced read-only in the
+# dashboard's TUNING PARAMETERS panel (they aren't in config.py -- they're the
+# round-specific calls made in the loop).
+_RUN_PARAMS: dict = {"mode": None, "driving_direction": None,
+                     "initial_section": None, "predict_n_points": 90}
 
 
 def _publish(state: dict):
@@ -128,6 +135,8 @@ def _mock_mode_loop():
     from simulation import MockRobotSimulator
 
     DRIVING_DIRECTION = "CCW"
+    _RUN_PARAMS.update({"mode": "mock", "driving_direction": DRIVING_DIRECTION,
+                        "initial_section": "S", "predict_n_points": 90})
     sim = MockRobotSimulator(initial_section="S", direction=DRIVING_DIRECTION)
     # MockRobotSimulator's own default along_mm (50.0) sits right next to a
     # corner, too close for the start-of-run fix to resolve cleanly. Overridden
@@ -228,6 +237,8 @@ def _real_mode_loop():
     # which leg the robot starts on, and the randomised driving direction.
     INITIAL_SECTION = "S"
     DRIVING_DIRECTION = "CCW"
+    _RUN_PARAMS.update({"mode": "real", "driving_direction": DRIVING_DIRECTION,
+                        "initial_section": INITIAL_SECTION, "predict_n_points": 90})
 
     lidar = RPLidarC1Source(config.LIDAR_PORT, config.LIDAR_BAUDRATE, config.LIDAR_SCAN_TIMEOUT_S)
     lidar.start()
@@ -343,6 +354,84 @@ def api_field():
         "island_max_mm": geo.ISLAND_MAX_MM,
         "slots": slots,
     }
+
+
+def _tuning_groups():
+    """Every tunable, read LIVE from the modules so the panel never drifts from
+    the code, grouped and annotated with what each one does / breaks. `critical`
+    marks the make-or-break ones you must set per robot/round."""
+    sp = scan_processing
+    r = _RUN_PARAMS
+
+    def P(name, value, unit, implication, critical=False):
+        return {"name": name, "value": value, "unit": unit,
+                "implication": implication, "critical": critical}
+
+    return [
+        {"group": "Round setup", "note": "Set these every round, before start (they live in the mode loop, not config.py).", "params": [
+            P("MODE", config.MODE, "", "real hardware vs simulator (config.py)."),
+            P("DRIVING_DIRECTION", r["driving_direction"], "", "CCW/CW. Fixes which side ray is the OUTER wall (CCW=left/90, CW=right/270) and the along-track sign. Wrong => lateral & along-track flipped.", True),
+            P("INITIAL_SECTION", r["initial_section"], "", "Which leg the robot starts on (S/E/N/W). Cannot be sensed (that's the 4-candidate ambiguity); affects the live tracked pose only, not the candidate markers.", True),
+        ]},
+        {"group": "Field geometry (mat_geometry.py)", "note": "Measure against your real mat -- every fix is referenced to these.", "params": [
+            P("OUTER_SIZE_MM", geo.OUTER_SIZE_MM, "mm", "Outer wall inside length = section length. Used in along-track (CW: along=OUTER-forward). Wrong => along-track biased, candidate markers sit off the walls.", True),
+            P("LANE_WIDTH_MM", geo.LANE_WIDTH_MM, "mm", "Outer-wall-to-island gap. The start fix checks left+right ~= this. Wrong => good scans rejected or bad ones accepted.", True),
+            P("INNER_SIZE_MM", geo.INNER_SIZE_MM, "mm", "Island size, DERIVED = OUTER - 2*LANE. Don't set by hand."),
+            P("ISLAND_MIN_MM", geo.ISLAND_MIN_MM, "mm", "Island near edge (derived)."),
+            P("ISLAND_MAX_MM", geo.ISLAND_MAX_MM, "mm", "Island far edge (derived)."),
+            P("SAFE_FIX_MARGIN_MM", geo.SAFE_FIX_MARGIN_MM, "mm", "How far past a corner (into the mid-edge band) before a fix is trusted. Bigger = safer but narrower usable start band."),
+            P("SAFE_FIX_ALONG_MIN_MM", geo.SAFE_FIX_ALONG_MIN_MM, "mm", "Valid mid-edge zone lower bound (derived). Start the robot inside [min,max]."),
+            P("SAFE_FIX_ALONG_MAX_MM", geo.SAFE_FIX_ALONG_MAX_MM, "mm", "Valid mid-edge zone upper bound (derived)."),
+        ]},
+        {"group": "LIDAR hardware (config.py)", "note": "", "params": [
+            P("LIDAR_PORT", config.LIDAR_PORT, "", "Serial device. Wrong => no data at all. Confirm with `ls /dev/ttyUSB*`."),
+            P("LIDAR_BAUDRATE", config.LIDAR_BAUDRATE, "baud", "C1 default 460800. Wrong => garbage / no scan."),
+            P("LIDAR_SCAN_TIMEOUT_S", config.LIDAR_SCAN_TIMEOUT_S, "s", "How long to assemble a scan. Too low drops points; too high adds latency."),
+        ]},
+        {"group": "LIDAR angle calibration (config.py)", "note": "The thing that bit you -- calibrate against a known heading.", "params": [
+            P("LIDAR_ANGLE_ZERO_OFFSET_DEG", config.LIDAR_ANGLE_ZERO_OFFSET_DEG, "deg", "Rotates raw angle so 0=forward, 90=left, 270=right. Wrong => the 90/270 searches look in the wrong physical direction and the fix fails/mislabels walls.", True),
+            P("LIDAR_ANGLE_SIGN", config.LIDAR_ANGLE_SIGN, "+/-1", "Flip if your unit's angle runs clockwise vs the code's CCW convention. Wrong => left/right swapped.", True),
+        ]},
+        {"group": "Sensor lever-arm (config.py)", "note": "Your measured LIDAR mount offset from the path-planner reference point.", "params": [
+            P("LIDAR_OFFSET_FORWARD_MM", config.LIDAR_OFFSET_FORWARD_MM, "mm", "Shifts the along-track (forward) read. A big mount offset biases along-track by that much."),
+            P("LIDAR_OFFSET_LATERAL_MM", config.LIDAR_OFFSET_LATERAL_MM, "mm", "Shifts the cross-lane read. Likely the source of a small lane-sum gap (yours read ~915 vs 1000)."),
+        ]},
+        {"group": "Rear blind arc (config.py) -- predicted overlay only", "note": "Does NOT affect the fix; only shapes each candidate's predicted cloud.", "params": [
+            P("REAR_BLIND_ARC_CENTER_DEG", config.REAR_BLIND_ARC_CENTER_DEG, "deg", "Robot-relative centre of the chassis-blocked wedge (180=straight back). Measure the empty gap in the debug dump."),
+            P("REAR_BLIND_ARC_WIDTH_DEG", config.REAR_BLIND_ARC_WIDTH_DEG, "deg", "Total width of that wedge. Wrong => the predicted gap doesn't line up with the real one (yours was ~107deg)."),
+        ]},
+        {"group": "Fix sanity tolerances (config.py)", "note": "", "params": [
+            P("LANE_WIDTH_TOLERANCE_MM", config.LANE_WIDTH_TOLERANCE_MM, "mm", "Noise margin on left+right ~= LANE_WIDTH. Too tight => good scans rejected; too loose => an occluded side wall gets accepted (wrong lateral).", True),
+            P("SIDE_SEARCH_WINDOW_DEG", config.SIDE_SEARCH_WINDOW_DEG, "deg", "How far from 90/270 to accept a lane-wall cluster. Too tight => 'no wall for left(90)'; too wide => grabs the wrong surface near a corner."),
+            P("FRONT_BACK_SEARCH_WINDOW_DEG", config.FRONT_BACK_SEARCH_WINDOW_DEG, "deg", "+/- window around 0deg used to gather the forward (along-track) range. Too tight => misses it; too wide => biases along-track with off-axis points."),
+            P("BROADSIDE_HEADING_TOLERANCE_DEG", config.BROADSIDE_HEADING_TOLERANCE_DEG, "deg", "Only the post-corner broadside RE-fix (compute_broadside_fix). Not used by the start-of-run fix."),
+            P("SECTION_LENGTH_TOLERANCE_MM", config.SECTION_LENGTH_TOLERANCE_MM, "mm", "DEPRECATED / unused -- belonged to the old broadside-start assumption (side rays summing to OUTER_SIZE). Ignore."),
+        ]},
+        {"group": "Clustering: scan -> walls/pillars (scan_processing.py)", "note": "Decide whether a surface even becomes a 'wall'. Tune only when the debug dump shows a wall missed or mislabelled.", "params": [
+            P("MIN_RANGE_MM", sp.MIN_RANGE_MM, "mm", "Drop points closer than this (chassis / sensor floor). Raise if the chassis intrudes as points."),
+            P("MAX_RANGE_MM", sp.MAX_RANGE_MM, "mm", "Drop implausibly far returns."),
+            P("MIN_QUALITY", sp.MIN_QUALITY, "", "Drop low-quality returns. Raise above 0 if weak noisy points form phantom clusters."),
+            P("MAX_ANGLE_GAP_DEG", sp.MAX_ANGLE_GAP_DEG, "deg", "Break a cluster on an angular gap bigger than this. Too small => one dropout splits a close wall (the ~9% sim rejects); too big => merges across real gaps."),
+            P("MAX_CHORD_JUMP_MM", sp.MAX_CHORD_JUMP_MM, "mm", "Break a cluster on a straight-line jump bigger than this. Too small fragments grazing walls; too big merges wall into a nearby pillar."),
+            P("MAX_CLUSTER_SPAN_DEG", sp.MAX_CLUSTER_SPAN_DEG, "deg", "Hard cap on one cluster's angular width (stops chaining around a corner). A CLOSE lane wall subtends a wide arc and can hit this cap -- raise (120-130) if close side walls get truncated; too high risks merging two walls at a corner.", True),
+            P("WALL_MIN_ARC_LENGTH_MM", sp.WALL_MIN_ARC_LENGTH_MM, "mm", "Min arc length (range x width) to call a cluster a wall. Too high drops short/far wall segments; too low calls a big pillar a wall."),
+            P("WALL_MAX_FLATNESS_RESIDUAL_MM", sp.WALL_MAX_FLATNESS_RESIDUAL_MM, "mm", "Max RMS off the fitted line to still be 'flat'. This is what rejects the forward corner-blend. Too low rejects a noisy real wall; too high lets a curved corner pass as flat and corrupts the fix.", True),
+            P("PILLAR_MIN_ARC_LENGTH_MM", sp.PILLAR_MIN_ARC_LENGTH_MM, "mm", "Lower arc bound for a pillar. Obstacle detection only; irrelevant to start-of-run."),
+            P("PILLAR_MAX_ARC_LENGTH_MM", sp.PILLAR_MAX_ARC_LENGTH_MM, "mm", "Upper arc bound for a pillar (50mm posts). Obstacle detection only."),
+            P("MIN_POINTS_PER_PILLAR", sp.MIN_POINTS_PER_PILLAR, "", "Reject singleton-point pillar fragments. Obstacle detection only."),
+        ]},
+        {"group": "Overlay & server", "note": "", "params": [
+            P("predict n_points", r["predict_n_points"], "", "Angular resolution of each candidate's predicted cloud (dashboard_server). Higher = denser overlay, bigger payload. Purely visual."),
+            P("STREAM_HZ", config.STREAM_HZ, "Hz", "Dashboard stream/refresh rate. No effect on localization; lower if the Pi is loaded."),
+            P("DASHBOARD_HOST", config.DASHBOARD_HOST, "", "Server bind address."),
+            P("DASHBOARD_PORT", config.DASHBOARD_PORT, "", "Server port."),
+        ]},
+    ]
+
+
+@app.route("/api/tuning")
+def api_tuning():
+    return {"groups": _tuning_groups()}
 
 
 @app.route("/stream")
