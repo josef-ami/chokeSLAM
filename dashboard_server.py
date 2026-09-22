@@ -79,7 +79,9 @@ def _publish(state: dict):
 
 
 def _rotate_to_global(x_mm, y_mm, pose_x, pose_y, heading_deg):
-    h = math.radians(heading_deg)
+    # heading_deg is a GRID BEARING (0=N, CW); convert to a maths angle so the
+    # robot-frame point (x=forward, y=left) rotates into world x/y correctly.
+    h = math.radians(90.0 - heading_deg)
     gx = pose_x + x_mm * math.cos(h) - y_mm * math.sin(h)
     gy = pose_y + x_mm * math.sin(h) + y_mm * math.cos(h)
     return gx, gy
@@ -333,10 +335,11 @@ def _real_mode_loop():
     _RT["start_candidates_payload"] = start_candidates_payload
 
     # You need to feed this estimator from your real STM32 telemetry:
-    #   - call estimator.update_heading(imu_yaw_deg) whenever you get a new
-    #     IMU reading (translated into this module's 0=east/90=north/CCW
-    #     convention -- your IMU almost certainly reports something else,
-    #     convert once at the boundary rather than changing convention here)
+    #   - call estimator.update_heading(imu_bearing_deg) whenever you get a new
+    #     IMU reading. Headings here are GRID BEARINGS (0=north, clockwise),
+    #     the same convention as a compass/IMU, so a north-referenced IMU feeds
+    #     in directly. If your IMU's zero isn't grid north, add the fixed
+    #     offset once at this boundary.
     #   - call estimator.update_odometry(delta_forward_mm) with the
     #     incremental distance since the last call, from your wheel encoder
     #   - call estimator.on_corner_completed() from your turn FSM the
@@ -487,7 +490,7 @@ def _param_registry():
             _pose("section", "section", "", "Which leg the live tracked pose is on. Sets the estimator's section directly.", options=["S", "E", "N", "W"], kind="enum"),
             _pose("along_mm", "along_mm", "mm", "Along-track position of the tracked pose (distance along the section from its CCW-first corner)."),
             _pose("lateral_mm", "lateral_mm", "mm", "Cross-lane position of the tracked pose (distance from the OUTER wall)."),
-            _pose("heading_deg", "heading_deg", "deg", "Tracked heading (0=east,90=north). Wrapped to 0..360."),
+            _pose("heading_deg", "heading_deg", "deg", "Tracked heading as a GRID BEARING (0=north, 90=east, clockwise). Wrapped to 0..360."),
         ]},
         {"group": "Field geometry (mat_geometry.py)", "note": "Measure against your real mat. Editing OUTER/LANE/margin re-derives island + safe zone and redraws the mat.", "params": [
             _geo_core("OUTER_SIZE_MM", "mm", "Outer wall inside length = section length. Used in along-track (CW: along=OUTER-forward). Wrong => along-track biased, markers off the walls.", True),

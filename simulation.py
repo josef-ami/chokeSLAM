@@ -65,7 +65,9 @@ def simulate_scan(x_mm: float, y_mm: float, heading_deg: float, pillars: list[Pi
 
     for i in range(n_points):
         robot_rel_angle = i * (360.0 / n_points)
-        global_angle = math.radians(heading_deg + robot_rel_angle)
+        # heading_deg is a GRID BEARING; convert to a maths angle for the ray
+        # trig: world_maths = (90 - bearing) + robot_rel_angle.
+        global_angle = math.radians((90.0 - heading_deg) + robot_rel_angle)
         dx, dy = math.cos(global_angle), math.sin(global_angle)
 
         best_t = None
@@ -129,11 +131,11 @@ class MockRobotSimulator:
         return [Pillar(s.x_mm, s.y_mm, c) for s, c in zip(chosen, colors)]
 
     def true_heading_deg(self) -> float:
-        # driving heading = broadside heading rotated -90 (so the section's
-        # "forward" runs along its length, matching the along-axis in
-        # mat_geometry._section_axes for CCW travel; CW just reverses it).
+        # driving heading (GRID BEARING) = broadside bearing turned 90 deg to
+        # run along the lane. Bearings increase clockwise, so CCW = broadside
+        # + 90, CW = broadside - 90 (see localization.driving_heading_deg).
         broadside = geo.BROADSIDE_HEADING_DEG[self.section]
-        return (broadside - 90.0) % 360.0 if self.direction == "CCW" else (broadside + 90.0) % 360.0
+        return (broadside + 90.0) % 360.0 if self.direction == "CCW" else (broadside - 90.0) % 360.0
 
     def true_state(self) -> SimTrueState:
         x, y = geo.local_to_global(self.section, self.along_mm, self.lateral_mm)

@@ -5,9 +5,13 @@ Coordinate convention (all millimetres):
     - Origin (0, 0) is the outer wall's bottom-left corner, as if the two
       straight outer walls were extended to meet it (this field has sharp,
       perpendicular outer corners, so that's also its literal physical corner).
-    - +X points right ("east"), +Y points up ("north") -- standard maths axes.
-    - Heading is in degrees, 0..360, standard maths convention:
-      0=+X(east), 90=+Y(north), 180=-X(west), 270=-Y(south).
+    - +X points right ("east"), +Y points up ("north").
+    - Heading is a GRID / COMPASS BEARING in degrees, 0..360, measured
+      CLOCKWISE from grid north: 0=north(+Y), 90=east(+X), 180=south(-Y),
+      270=west(-X). This matches a compass / IMU, not the maths convention.
+      Convert to the maths angle used for x/y trig with
+      math_deg = (90 - bearing) % 360. (Robot-relative LIDAR angles are a
+      SEPARATE frame and unchanged: 0=forward, 90=left, 180=back, 270=right.)
 
 Field layout: a square lane (constant width, per the Obstacle Challenge rule
 "distance between the track borders will be always 1000mm") running around a
@@ -50,10 +54,10 @@ Section = Literal["S", "E", "N", "W"]
 NEXT_SECTION_CCW: dict[Section, Section] = {"S": "E", "E": "N", "N": "W", "W": "S"}
 NEXT_SECTION_CW: dict[Section, Section] = {v: k for k, v in NEXT_SECTION_CCW.items()}
 
-# Heading (deg) the robot must be at to be "broadside": front pointing at the
-# OUTER wall, back at the inner wall (island). Derived directly from which
-# side of the square each section's outer wall is on.
-BROADSIDE_HEADING_DEG: dict[Section, float] = {"S": 270.0, "E": 0.0, "N": 90.0, "W": 180.0}
+# Heading (GRID BEARING, deg) the robot must be at to be "broadside": front
+# pointing at the OUTER wall, back at the inner wall (island). Each section
+# faces its own outer wall: S->south(180), E->east(90), N->north(0), W->west(270).
+BROADSIDE_HEADING_DEG: dict[Section, float] = {"S": 180.0, "E": 90.0, "N": 0.0, "W": 270.0}
 
 # IMPORTANT, found while testing this module: the island is a square (an
 # inward offset of the outer square by LANE_WIDTH_MM on each side), so it

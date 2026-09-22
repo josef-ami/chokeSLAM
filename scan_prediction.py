@@ -82,7 +82,8 @@ def predict_scan_global(x_mm: float, y_mm: float, heading_deg: float,
         robot_rel = i * (360.0 / n_points)
         if model_blind_arc and _in_blind_arc(robot_rel):
             continue
-        global_angle = math.radians(heading_deg + robot_rel)
+        # heading_deg is a GRID BEARING; convert to a maths angle for ray trig.
+        global_angle = math.radians((90.0 - heading_deg) + robot_rel)
         dx, dy = math.cos(global_angle), math.sin(global_angle)
 
         best_t = None

@@ -198,7 +198,21 @@ driving_direction)` resolves position from that view:
 
 Then `candidate_start_positions(along, lateral, driving_direction)` places all
 4 legs, each facing its **driving heading** (`driving_heading_deg()` -- the
-leg's broadside heading rotated -/+90 deg), plus the +90 deg variant.
+leg's broadside bearing turned 90 deg to run along the lane), plus the +90 deg
+variant.
+
+**Angle convention -- GRID BEARINGS.** All *world* headings (robot heading,
+`BROADSIDE_HEADING_DEG`, driving headings, candidate bearings, the dashboard's
+heading readout) are grid/compass bearings: **0 = grid north, 90 = east,
+clockwise**, matching a compass/IMU. So a robot facing grid north reads 0 deg
+(not 90). This is separate from the *robot-relative* LIDAR frame used by the
+fix, which is unchanged (0 = forward, 90 = left, 180 = back, 270 = right). The
+robot->world rotation converts once with `maths_angle = (90 - bearing)`; if you
+switch back and forth, that's the only relation you need. Because bearings run
+clockwise, the driving heading is `broadside + 90` for CCW and `broadside - 90`
+for CW (the opposite sign from a maths-angle convention). Feed a north-
+referenced IMU into `update_heading()` directly; add a fixed offset at that
+boundary only if your IMU's zero isn't grid north.
 
 This replaces an earlier version that assumed the robot faced the OUTER WALL
 (broadside) at start, which put the side rays down the lane and expected

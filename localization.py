@@ -255,13 +255,15 @@ def compute_start_of_run_fix(clusters: list[Cluster], driving_direction: str = "
 
 
 def driving_heading_deg(section: geo.Section, driving_direction: str) -> float:
-    """The heading a robot faces while DRIVING along `section` in
-    `driving_direction` -- i.e. facing the direction of travel, parallel to
-    the walls. This is the section's broadside heading (facing the outer wall)
-    rotated -90 deg for CCW / +90 deg for CW, matching the simulator's
-    true_heading_deg and verified against the along-lane scan geometry."""
+    """The heading (GRID BEARING) a robot faces while DRIVING along `section`
+    in `driving_direction` -- facing the direction of travel, parallel to the
+    walls. It's the section's broadside bearing (facing the outer wall) turned
+    90 deg to run along the lane. NOTE the sign vs the old maths convention:
+    bearings increase CLOCKWISE, so CCW travel is broadside + 90, CW is
+    broadside - 90 (the opposite of what it was when headings were maths
+    angles). Verified against the simulator's true_heading_deg."""
     broadside = geo.BROADSIDE_HEADING_DEG[section]
-    return (broadside - 90.0) % 360.0 if driving_direction == "CCW" else (broadside + 90.0) % 360.0
+    return (broadside + 90.0) % 360.0 if driving_direction == "CCW" else (broadside - 90.0) % 360.0
 
 
 @dataclass

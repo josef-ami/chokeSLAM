@@ -68,7 +68,7 @@
     <div class="row"><span>mode</span><span id="mode">-</span></div>
     <div class="row"><span>section</span><span id="section">-</span></div>
     <div class="row"><span>x, y (mm)</span><span id="xy">-</span></div>
-    <div class="row"><span>heading (deg)</span><span id="heading">-</span></div>
+    <div class="row"><span>heading (grid bearing)</span><span id="heading">-</span></div>
     <div class="row"><span>lateral from outer (mm)</span><span id="lateral">-</span></div>
     <div class="row"><span>along section (mm)</span><span id="along">-</span></div>
 
@@ -167,9 +167,13 @@ function drawPoints(points) {
   }
 }
 
+// heading_deg is a GRID BEARING (0=N, CW). Screen direction: convert to a
+// maths angle (90 - bearing), then negate for the flipped canvas y-axis.
+function bearingToScreenAngle(bearingDeg) { return -(90 - bearingDeg) * Math.PI / 180; }
+
 function drawRobot(pose, color, filled) {
   const [px, py] = toCanvas(pose.x_mm, pose.y_mm);
-  const h = -pose.heading_deg * Math.PI / 180; // canvas y flipped
+  const h = bearingToScreenAngle(pose.heading_deg);
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
   ctx.lineWidth = 2;
@@ -217,7 +221,7 @@ function drawCandidatePrediction(c) {
 // solution here". A distinct arrow is drawn for each of the 8.
 function drawCandidate(c) {
   const [px, py] = toCanvas(c.x_mm, c.y_mm);
-  const h = -c.heading_deg * Math.PI / 180;
+  const h = bearingToScreenAngle(c.heading_deg);
   const dashed = c.heading_variant === 'secondary';
   const col = candColor(c.idx);
   ctx.save();
