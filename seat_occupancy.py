@@ -19,32 +19,30 @@ bearing AND the right range AND have the right angular width -- a far narrower
 coincidence than merely "looks pillar-sized".
 
 
-COORDINATE FRAME (lane-local, per WRO's "grid north" convention)
-----------------------------------------------------------------
-Each of the four lanes gets its own frame. Nothing here needs to know WHICH
-lane it is on, and nothing here needs to know the round's driving direction.
+COORDINATE FRAME (the lane frame -- see lane_frame.py; changed Sept 2026)
+------------------------------------------------------------------------
+Each of the four lanes gets its own frame, anchored to the direction of travel.
 
     +y  = grid north = the direction of travel, along the lane.
-          y = 0   at the wall behind the robot (the corner it entered from)
-          y = 3000 at the wall ahead (the corner it is driving toward)
-          This is the user's `y = 3000 - d(0 deg)`.
+          y = 0    at the wall behind the robot (the corner it entered from)
+          y = 3000 at the wall ahead.  At initialisation y = 3000 - front range.
 
-    +x  = to the robot's right (grid bearing 90).
-          x = 0    at the LEFT-hand wall
-          x = 1000 at the RIGHT-hand wall
-          This is the user's `x` from the 90 deg / 270 deg rays:
-          x = d(270 deg), cross-checked by d(90 deg) = 1000 - x.
+    x   = distance from the OUTER wall, in both round directions.
+          x = 0 at the outer wall, x = 1000 at the island wall.
+          At initialisation x = d(90) when driving CCW (outer wall on the
+          right) and x = d(270) when driving CW (outer wall on the left).
 
-    Bearings are measured CLOCKWISE from +y, so bearing = atan2(dx, dy)
-    -- east over north, NOT the usual atan2(y, x).
+    Bearings are CLOCKWISE from grid north: 0 = ahead, 90 = right, 270 = left.
+    Because +x points LEFT when driving CCW and RIGHT when driving CW, the
+    bearing of a lane vector (dx, dy) is
+          CCW:  360 - atan2(dx, dy)
+          CW :        atan2(dx, dy)
+    (lane_frame.bearing_of). The LIDAR is clockwise too, so the angle to look
+    at is simply bearing - robot_yaw.
 
-Because the frame is anchored to the direction of travel and the lane is
-symmetric about its own centreline, the seat table below is the SAME for all
-four lanes and for both driving directions. That is the whole reason the
-lane-local choice pays off: no CW/CCW branch, no S/E/N/W branch, no outer-wall
-side to get backwards. (For reference: mapping this frame back to global mat
-coordinates reproduces exactly the 24 global seat positions of Figure 11, for
-every lane and both directions -- see test_seat_occupancy.py::test_frame_maps_to_global.)
+The seat table is the same for all four lanes and both directions (the seats
+are symmetric about the lane centreline), so only the bearing formula needs
+the round direction.
 
 
 SEAT GEOMETRY -- from the rulebook, not from mat_geometry.py
@@ -65,13 +63,8 @@ corner, cross-checked against Figure 3 and section 13:
   - 13.13 seat is 50 x 50 mm; 13.19 pillar is 50 x 50 x 100 mm
   - 13.15 the "was it moved" circle around a seat is 85 mm diameter
 
-NOTE: this deliberately does NOT use mat_geometry.all_slots(). That table
-(SLOT_COL_FRACS = (0.25, 0.75), SLOT_ROW_FRACS = (1/6, 0.5, 5/6)) places the
-seats at 250/750 across the lane and 500/1500/2500 along the full 3000 mm
-edge, which disagrees with Figure 11 on every one of the 24 slots, some by
-over a metre. Left untouched here as instructed; this module carries its own
-rulebook-derived table so that a later fix to mat_geometry.py cannot silently
-change the answers this module gives.
+(The old mat_geometry.all_slots() table, which disagreed with Figure 11, was
+deleted in the Sept 2026 changes; this module is the only seat table.)
 """
 from __future__ import annotations
 
@@ -80,13 +73,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable, Sequence
 
+import lane_frame as lf
+
 # ---------------------------------------------------------------------------
 # Field constants (rulebook-derived -- see module docstring)
 # ---------------------------------------------------------------------------
 LANE_LENGTH_MM = 3000.0   # wall-to-wall along the direction of travel
 LANE_WIDTH_MM = 1000.0    # wall-to-wall across the lane
 
-SEAT_X_MM = (400.0, 600.0)                 # from the LEFT-hand wall
+SEAT_X_MM = (400.0, 600.0)                 # from the OUTER wall (same numbers from either wall)
 SEAT_Y_MM = (1000.0, 1500.0, 2000.0)       # along travel, from the entry wall
 
 PILLAR_SIDE_MM = 50.0
@@ -111,19 +106,19 @@ class Occupancy(Enum):
 
 @dataclass(frozen=True)
 class Seat:
-    index: int      # 0..5, stable ordering: near->far, then left->right
-    name: str       # e.g. "near-left", for logs and the dashboard
-    x_mm: float     # lane-local, from the left-hand wall
-    y_mm: float     # lane-local, along travel from the entry wall
+    index: int      # 0..5, stable ordering: near->far, then outer->inner
+    name: str       # e.g. "near-outer", for logs and the dashboard
+    x_mm: float     # lane frame: distance from the OUTER wall
+    y_mm: float     # lane frame: along travel from the entry wall
 
 
 def seats() -> list[Seat]:
-    """The 6 traffic-sign seats of one straightforward section, in lane-local
+    """The 6 traffic-sign seats of one straightforward section, in lane
     coordinates. Ordering is fixed: index = 2*row + col, row running from the
     entry end of the section (y=1000) to the exit end (y=2000), col running
-    left (x=400) to right (x=600)."""
+    outer (x=400, nearer the outer wall) to inner (x=600, nearer the island)."""
     row_names = ("near", "mid", "far")
-    col_names = ("left", "right")
+    col_names = ("outer", "inner")
     out: list[Seat] = []
     for row, y in enumerate(SEAT_Y_MM):
         for col, x in enumerate(SEAT_X_MM):
@@ -168,10 +163,10 @@ class DetectParams:
     # surface.
     max_range_step_mm: float = 40.0
 
-    # Rear chassis blind wedge, robot-relative, in the LIDAR's own angle
-    # convention (0 = forward, 90 = left). Seats falling inside it are
-    # reported UNKNOWN rather than EMPTY. Defaults mirror config.py; measure
-    # your own unit off a raw scan dump.
+    # Rear chassis blind wedge, robot-relative, CLOCKWISE LIDAR angle
+    # (0 = forward, 90 = right). Seats falling inside it are reported UNKNOWN
+    # rather than EMPTY. lane_init builds these from config.REAR_BLIND_ARC_*
+    # so there is one source of truth; the defaults here mirror config.py.
     blind_arc_center_deg: float = 180.0
     blind_arc_width_deg: float = 105.0
 
@@ -190,6 +185,7 @@ class DetectParams:
     # the robot's LEFT, matching config.LIDAR_OFFSET_*. Ranges are measured
     # from the sensor, so the seat vector has to be taken from there; with a
     # vehicle up to 300 x 200 mm (rule 9.17) this is not a rounding error.
+    # lane_init fills these from config.LIDAR_OFFSET_* (one source of truth).
     lidar_offset_forward_mm: float = 0.0
     lidar_offset_lateral_mm: float = 0.0
 
@@ -227,9 +223,9 @@ class SeatReading:
     state: Occupancy
     reason: str = ""
 
-    predicted_bearing_deg: float = 0.0        # grid bearing, robot -> seat
+    predicted_bearing_deg: float = 0.0        # clockwise from grid north, sensor -> seat
     predicted_rel_bearing_deg: float = 0.0    # same, minus robot yaw
-    predicted_lidar_angle_deg: float = 0.0    # in the LIDAR's own angle sense
+    predicted_lidar_angle_deg: float = 0.0    # clockwise LIDAR angle (== rel bearing)
     search_half_width_deg: float = 0.0
 
     expected_centre_mm: float = 0.0           # range to the seat centre
@@ -257,37 +253,21 @@ def _wrap180(a: float) -> float:
     return (a + 180.0) % 360.0 - 180.0
 
 
-def bearing_to(dx_mm: float, dy_mm: float) -> float:
-    """Grid bearing (0 = grid north = direction of travel, increasing
-    CLOCKWISE) of the vector (dx, dy) in lane-local coordinates.
+def bearing_to(dx_mm: float, dy_mm: float, direction: str) -> float:
+    """Clockwise bearing (0 = grid north = direction of travel) of the lane
+    vector (dx, dy), where x is measured from the OUTER wall:
 
-    This is atan2(EAST, NORTH) -- dx first, dy second -- not the usual
-    atan2(y, x). Sanity: straight ahead (0, +) -> 0; to the right (+, 0) -> 90;
-    behind (0, -) -> 180; to the left (-, 0) -> 270.
+        CCW:  360 - atan2(dx, dy)     (+x points to the robot's left)
+        CW :        atan2(dx, dy)     (+x points to the robot's right)
 
-    Two-argument atan2 is essential. One-argument atan(dx/dy) only spans
-    +/-90 deg, so it folds a seat behind the robot onto a seat ahead of it and
-    divides by zero for a seat exactly abeam.
+    Sanity, CCW: ahead (0, +) -> 0; toward the outer wall (-, 0) -> 90 (right);
+    toward the island (+, 0) -> 270 (left); behind (0, -) -> 180.
+    Two-argument atan2 is essential: one-argument atan(dx/dy) only spans
+    +/-90 deg, so it folds a seat behind the robot onto one ahead of it and
+    divides by zero for a seat exactly abeam -- both happen at initialisation,
+    where the robot stands between the seat rows.
     """
-    return math.degrees(math.atan2(dx_mm, dy_mm)) % 360.0
-
-
-def bearing_to_lidar_angle(rel_bearing_deg: float) -> float:
-    """Convert a robot-relative grid bearing (clockwise) into this codebase's
-    LIDAR angle convention (0 = forward, 90 = left, i.e. counter-clockwise).
-
-    The two axes run in opposite senses, so the conversion is a mirror:
-    lidar = -bearing, mod 360. That is the `2*pi - theta` in the original
-    sketch -- correct as written, once theta is a genuine robot-relative
-    bearing from atan2 rather than a world bearing from one-argument atan.
-
-    If your unit's raw angles run the other way, do NOT patch it here: set
-    config.LIDAR_ANGLE_SIGN / LIDAR_ANGLE_ZERO_OFFSET_DEG and feed this
-    function points that scan_processing.clean_and_project has already
-    corrected, so there is exactly one place in the codebase where mount
-    calibration lives.
-    """
-    return (-rel_bearing_deg) % 360.0
+    return lf.bearing_of(dx_mm, dy_mm, direction)
 
 
 def _in_blind_arc(lidar_angle_deg: float, p: DetectParams) -> bool:
@@ -305,8 +285,9 @@ def _normalise_scan(scan: Iterable, p: DetectParams) -> list[tuple[float, float]
       - scan_processing.ScanPoint objects
     and returns cleaned (angle_deg, range_mm) sorted by angle.
 
-    IMPORTANT: angles must ALREADY be in the corrected robot frame -- i.e. run
-    through scan_processing.clean_and_project with your LIDAR_ANGLE_SIGN /
+    IMPORTANT: angles must ALREADY be in the corrected, CLOCKWISE robot frame
+    (0 = forward, 90 = right) -- i.e. run through
+    scan_processing.clean_and_project with your LIDAR_ANGLE_SIGN /
     LIDAR_ANGLE_ZERO_OFFSET_DEG. This module does not apply mount calibration.
     """
     out: list[tuple[float, float]] = []
@@ -392,25 +373,26 @@ def _find_pillar_run(window: Sequence[tuple[float, float]], expected_face_mm: fl
 def detect_seat_occupancy(scan: Iterable,
                           robot_x_mm: float,
                           robot_y_mm: float,
+                          direction: str,
                           robot_yaw_deg: float = 0.0,
                           params: DetectParams | None = None,
                           seat_list: Sequence[Seat] | None = None) -> list[SeatReading]:
     """Decide OCCUPIED / EMPTY / UNKNOWN for each of the 6 seats of the
-    straightforward section the robot is currently in.
+    straightforward section of the lane the robot is in.
 
     Args:
         scan:          one LIDAR revolution, angles already mount-corrected
-                       (see _normalise_scan).
-        robot_x_mm:    lane-local x -- distance from the LEFT-hand wall,
-                       i.e. the 270 deg reading of the localization step.
-        robot_y_mm:    lane-local y -- 3000 minus the 0 deg reading.
-        robot_yaw_deg: the robot's heading relative to grid north, positive
-                       CLOCKWISE (grid-bearing sense), 0 when pointing exactly
-                       down the lane. This is NOT optional in practice: the
-                       seat table is in the lane frame while the scan is in the
-                       chassis frame, and a car wanders several degrees within
-                       a lane. Feed it your IMU yaw minus the lane's own grid
-                       north.
+                       and clockwise (see _normalise_scan).
+        robot_x_mm:    lane x of the pose reference point -- distance from
+                       the OUTER wall.
+        robot_y_mm:    lane y of the pose reference point -- along travel
+                       from the entry wall.
+        direction:     "CCW" or "CW" (the round direction). Needed because
+                       +x points left for CCW and right for CW.
+        robot_yaw_deg: heading relative to the lane's grid north, clockwise
+                       positive. 0 at initialisation (agreed: the robot is
+                       taken to be aligned); the IMU yaw during the
+                       entry-corner re-checks.
         params:        thresholds, see DetectParams.
         seat_list:     override the seat table (tests only).
 
@@ -422,17 +404,9 @@ def detect_seat_occupancy(scan: Iterable,
     out: list[SeatReading] = []
 
     # Ranges are measured from the SENSOR, not from the pose reference point.
-    # Move to the sensor's own lane-local position before taking any vector.
-    # Robot forward in lane-local is bearing `robot_yaw_deg`, i.e. the unit
-    # (sin yaw, cos yaw); the robot's left is that turned 90 deg anticlockwise
-    # in the compass sense, i.e. (-cos yaw, sin yaw).
-    yaw_rad = math.radians(robot_yaw_deg)
-    sensor_x = (robot_x_mm
-                + p.lidar_offset_forward_mm * math.sin(yaw_rad)
-                - p.lidar_offset_lateral_mm * math.cos(yaw_rad))
-    sensor_y = (robot_y_mm
-                + p.lidar_offset_forward_mm * math.cos(yaw_rad)
-                + p.lidar_offset_lateral_mm * math.sin(yaw_rad))
+    # Move to the sensor's own lane position before taking any vector.
+    sensor_x, sensor_y = lf.offset_in_lane(robot_x_mm, robot_y_mm, robot_yaw_deg, direction,
+                                           p.lidar_offset_forward_mm, p.lidar_offset_lateral_mm)
 
     for seat in (seat_list if seat_list is not None else seats()):
         dx = seat.x_mm - sensor_x
@@ -446,9 +420,9 @@ def detect_seat_occupancy(scan: Iterable,
         # pillar's yaw.
         expected_face = expected_centre - PILLAR_HALF_MM
 
-        bearing = bearing_to(dx, dy)
+        bearing = bearing_to(dx, dy, direction)
         rel_bearing = (bearing - robot_yaw_deg) % 360.0
-        lidar_angle = bearing_to_lidar_angle(rel_bearing)
+        lidar_angle = rel_bearing          # the LIDAR is clockwise too
 
         # The pillar's own angular half-width at this range, plus pose margin.
         subtense_half = math.degrees(math.atan2(PILLAR_HALF_DIAG_MM,

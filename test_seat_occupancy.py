@@ -5,6 +5,13 @@ Everything here ray-casts the REAL global field (3000x3000 outer square +
 1000x1000 island + 50 mm pillars) and hands the detector only lane-local
 numbers, so the lane<->global transform is exercised honestly rather than
 assumed. Run with:  python3 test_seat_occupancy.py
+
+Sept 2026: updated to the agreed conventions -- CLOCKWISE robot angles
+(0 = forward, 90 = right, 270 = left) and lane x measured from the OUTER wall;
+the detector now takes the round direction. The ray-caster below derives
+everything from global geometry (grid bearings), independently of
+lane_frame's bearing formula, so the tests check that formula rather than
+share it.
 """
 from __future__ import annotations
 
@@ -42,7 +49,8 @@ def _ray_box(ox, oy, dx, dy, x0, y0, x1, y1):
 
 def cast_global(x, y, heading_bearing_deg, pillars=(), n_points=720,
                 noise_mm=0.0, dropout=0.0, blind_center=180.0, blind_width=105.0):
-    """Returns (robot_rel_angle_deg, range_mm) with 0 = forward, 90 = left."""
+    """Returns (robot_rel_angle_deg, range_mm), angle CLOCKWISE from forward
+    (0 = forward, 90 = right). The ray's global bearing is heading + angle."""
     outer = (0.0, 0.0, OUTER, OUTER)
     island = (ISLAND_MIN, ISLAND_MIN, ISLAND_MAX, ISLAND_MAX)
     boxes = [island] + [(px - 25, py - 25, px + 25, py + 25) for px, py in pillars]
@@ -51,7 +59,7 @@ def cast_global(x, y, heading_bearing_deg, pillars=(), n_points=720,
         rel = i * 360.0 / n_points
         if blind_width and abs((rel - blind_center + 180.0) % 360.0 - 180.0) <= blind_width / 2.0:
             continue
-        world = math.radians((90.0 - heading_bearing_deg) + rel)
+        world = math.radians(90.0 - (heading_bearing_deg + rel))
         dx, dy = math.cos(world), math.sin(world)
         best = None
         hit = _ray_box(x, y, dx, dy, *outer)
@@ -104,15 +112,33 @@ def test_frame_maps_to_global():
 
 
 def test_bearing_conventions():
-    assert abs(so.bearing_to(0, 100) - 0.0) < 1e-9        # ahead
-    assert abs(so.bearing_to(100, 0) - 90.0) < 1e-9       # right
-    assert abs(so.bearing_to(0, -100) - 180.0) < 1e-9     # behind
-    assert abs(so.bearing_to(-100, 0) - 270.0) < 1e-9     # left
-    # bearing -> lidar angle is a mirror (the sketch's 2*pi - theta)
-    assert abs(so.bearing_to_lidar_angle(90.0) - 270.0) < 1e-9   # right -> 270
-    assert abs(so.bearing_to_lidar_angle(270.0) - 90.0) < 1e-9   # left  -> 90
-    assert abs(so.bearing_to_lidar_angle(0.0) - 0.0) < 1e-9
-    print("PASS  test_bearing_conventions")
+    # x is measured from the OUTER wall. CCW: outer wall on the right, so -x is
+    # toward the right (90) and +x toward the island on the left (270).
+    assert abs(so.bearing_to(0, 100, "CCW") - 0.0) < 1e-9        # ahead
+    assert abs(so.bearing_to(-100, 0, "CCW") - 90.0) < 1e-9      # toward outer wall = right
+    assert abs(so.bearing_to(0, -100, "CCW") - 180.0) < 1e-9     # behind
+    assert abs(so.bearing_to(100, 0, "CCW") - 270.0) < 1e-9      # toward island = left
+    # CW: outer wall on the left, so +x (toward the island) is to the right.
+    assert abs(so.bearing_to(100, 0, "CW") - 90.0) < 1e-9
+    assert abs(so.bearing_to(-100, 0, "CW") - 270.0) < 1e-9
+    # Independent check against GLOBAL geometry: the global grid bearing of a
+    # lane vector must equal the lane's grid north + bearing_to(...).
+    rng = random.Random(5)
+    worst = 0.0
+    for lane in LANES:
+        for direction in ("CCW", "CW"):
+            for _ in range(200):
+                x0, y0 = rng.uniform(0, 1000), rng.uniform(0, 3000)
+                x1, y1 = rng.uniform(0, 1000), rng.uniform(0, 3000)
+                g0 = lane_to_global(lane, direction, x0, y0)
+                g1 = lane_to_global(lane, direction, x1, y1)
+                gdx, gdy = g1[0] - g0[0], g1[1] - g0[1]
+                global_bearing = math.degrees(math.atan2(gdx, gdy)) % 360.0   # east over north
+                ours = (lane_grid_north_bearing(lane, direction)
+                        + so.bearing_to(x1 - x0, y1 - y0, direction)) % 360.0
+                worst = max(worst, abs((global_bearing - ours + 180.0) % 360.0 - 180.0))
+    assert worst < 1e-6, worst
+    print(f"PASS  test_bearing_conventions      (formula matches global geometry, worst {worst:.1e} deg)")
 
 
 def test_no_false_positives_on_empty_field():
@@ -125,7 +151,7 @@ def test_no_false_positives_on_empty_field():
             for y in range(600, 2400, 100):
                 for x in (300.0, 500.0, 700.0):
                     scan = scene(lane, direction, x, float(y), set())
-                    for r in so.detect_seat_occupancy(scan, x, float(y)):
+                    for r in so.detect_seat_occupancy(scan, x, float(y), direction):
                         total += 1
                         if r.state is so.Occupancy.OCCUPIED:
                             bad += 1
@@ -136,11 +162,11 @@ def test_no_false_positives_on_empty_field():
 
 def test_occlusion_reports_unknown():
     """A seat hidden behind a nearer pillar must come back UNKNOWN, never
-    EMPTY -- the near-left and far-left seats line up from a robot sitting on
-    the left-hand side of the lane."""
-    # seats 0 (near-left, y=1000) and 4 (far-left, y=2000) share x=400.
+    EMPTY -- the near-outer and far-outer seats line up from a robot sitting
+    400 mm from the outer wall."""
+    # seats 0 (near-outer, y=1000) and 4 (far-outer, y=2000) share x=400.
     scan = scene("S", "CCW", 400.0, 500.0, {0})   # only the NEAR one is filled
-    rs = so.detect_seat_occupancy(scan, 400.0, 500.0)
+    rs = so.detect_seat_occupancy(scan, 400.0, 500.0, "CCW")
     near, far = rs[0], rs[4]
     assert near.state is so.Occupancy.OCCUPIED, near
     assert far.state is so.Occupancy.UNKNOWN, far
@@ -156,8 +182,8 @@ def test_yaw_error_is_handled():
     x, y = 500.0, 700.0
     for yaw in (-6.0, -3.0, 0.0, 3.0, 6.0):
         scan = scene("E", "CCW", x, y, occ, yaw_deg=yaw)
-        with_yaw = so.detect_seat_occupancy(scan, x, y, robot_yaw_deg=yaw)
-        without = so.detect_seat_occupancy(scan, x, y, robot_yaw_deg=0.0)
+        with_yaw = so.detect_seat_occupancy(scan, x, y, "CCW", robot_yaw_deg=yaw)
+        without = so.detect_seat_occupancy(scan, x, y, "CCW", robot_yaw_deg=0.0)
         ok_w = sum(1 for r in with_yaw
                    if (r.state is so.Occupancy.OCCUPIED) == (r.seat.index in occ))
         ok_n = sum(1 for r in without
@@ -179,7 +205,7 @@ def test_accuracy_sweep():
                     for yaw in (-2.0, 0.0, 2.0):
                         occ = random.choice(layouts)
                         scan = scene(lane, direction, x, y, occ, yaw_deg=yaw)
-                        for r in so.detect_seat_occupancy(scan, x, y, robot_yaw_deg=yaw):
+                        for r in so.detect_seat_occupancy(scan, x, y, direction, robot_yaw_deg=yaw):
                             truth = r.seat.index in occ
                             if r.state is so.Occupancy.UNKNOWN:
                                 unk_true += truth
@@ -230,7 +256,7 @@ def test_drive_through_resolves_every_seat_in_time():
                     x = 500.0 + 60.0 * math.sin(y / 400.0)   # a wandering line
                     yaw = 2.0 * math.cos(y / 350.0)
                     scan = scene(lane, direction, x, y, occ, yaw_deg=yaw)
-                    for r in so.detect_seat_occupancy(scan, x, y, robot_yaw_deg=yaw):
+                    for r in so.detect_seat_occupancy(scan, x, y, direction, robot_yaw_deg=yaw):
                         if r.state is so.Occupancy.UNKNOWN:
                             continue
                         if r.seat.index not in settled:
@@ -279,7 +305,7 @@ def test_coarse_sampling_never_reports_false_empty():
                     scan = cast_global(rx, ry, north, pil, n_points=360,
                                        noise_mm=4.0, dropout=0.02, blind_width=0.0)
                     p = so.DetectParams(blind_arc_width_deg=0.0)
-                    for r in so.detect_seat_occupancy(scan, x, y, params=p):
+                    for r in so.detect_seat_occupancy(scan, x, y, direction, params=p):
                         checked += 1
                         if r.seat.index in occ and r.state is so.Occupancy.EMPTY:
                             false_empty += 1
@@ -291,31 +317,33 @@ def test_coarse_sampling_never_reports_false_empty():
 def test_lidar_lever_arm():
     """With the sensor mounted well off the reference point, the answers must
     only stay right if the offset is declared. This is the check that the
-    lever-arm maths has the correct sign."""
-    fwd, lat = 120.0, 80.0          # sensor 120 mm ahead, 80 mm to the left
+    lever-arm maths has the correct sign -- the sensor position is derived
+    here in GLOBAL coordinates (grid bearings), independently of
+    lane_frame.offset_in_lane, for both round directions."""
+    fwd, lat = 120.0, 80.0          # sensor 120 mm ahead, 80 mm to the LEFT
     occ = {0, 3, 5}
-    lane, direction, x, y, yaw = "N", "CW", 520.0, 700.0, 3.0
+    for lane, direction, x, y, yaw in (("N", "CW", 520.0, 700.0, 3.0),
+                                       ("E", "CCW", 470.0, 650.0, -2.0)):
+        heading = (lane_grid_north_bearing(lane, direction) + yaw) % 360.0
+        gx, gy = lane_to_global(lane, direction, x, y)
+        hf = math.radians(heading)            # global unit of a bearing b: (sin b, cos b)
+        hl = math.radians(heading - 90.0)     # the robot's left
+        sgx = gx + fwd * math.sin(hf) + lat * math.sin(hl)
+        sgy = gy + fwd * math.cos(hf) + lat * math.cos(hl)
+        pillars = [lane_to_global(lane, direction, s.x_mm, s.y_mm)
+                   for s in so.seats() if s.index in occ]
+        scan = cast_global(sgx, sgy, heading, pillars, noise_mm=4.0, dropout=0.02)
 
-    # Place the SENSOR where the scan is taken from, derived independently.
-    yr = math.radians(yaw)
-    sx = x + fwd * math.sin(yr) - lat * math.cos(yr)
-    sy = y + fwd * math.cos(yr) + lat * math.sin(yr)
-    gx, gy = lane_to_global(lane, direction, sx, sy)
-    north = lane_grid_north_bearing(lane, direction)
-    pillars = [lane_to_global(lane, direction, s.x_mm, s.y_mm)
-               for s in so.seats() if s.index in occ]
-    scan = cast_global(gx, gy, (north + yaw) % 360.0, pillars, noise_mm=4.0, dropout=0.02)
+        declared = so.DetectParams(lidar_offset_forward_mm=fwd, lidar_offset_lateral_mm=lat)
+        with_off = so.detect_seat_occupancy(scan, x, y, direction, robot_yaw_deg=yaw, params=declared)
+        without = so.detect_seat_occupancy(scan, x, y, direction, robot_yaw_deg=yaw)
 
-    declared = so.DetectParams(lidar_offset_forward_mm=fwd, lidar_offset_lateral_mm=lat)
-    with_off = so.detect_seat_occupancy(scan, x, y, robot_yaw_deg=yaw, params=declared)
-    without = so.detect_seat_occupancy(scan, x, y, robot_yaw_deg=yaw)
-
-    def score(rs):
-        return sum(1 for r in rs
-                   if (r.state is so.Occupancy.OCCUPIED) == (r.seat.index in occ))
-    print(f"PASS  test_lidar_lever_arm          declared={score(with_off)}/6  "
-          f"undeclared={score(without)}/6")
-    assert score(with_off) == 6, so.summary(with_off)
+        def score(rs):
+            return sum(1 for r in rs
+                       if (r.state is so.Occupancy.OCCUPIED) == (r.seat.index in occ))
+        print(f"PASS  test_lidar_lever_arm          {direction}: declared={score(with_off)}/6  "
+              f"undeclared={score(without)}/6")
+        assert score(with_off) == 6, so.summary(with_off)
 
 
 def test_pose_error_budget():
@@ -342,7 +370,7 @@ def test_pose_error_budget():
                         bx = x + pos_err * math.cos(ang)
                         by = y + pos_err * math.sin(ang)
                         byaw = random.uniform(-yaw_err, yaw_err)
-                        for r in so.detect_seat_occupancy(scan, bx, by, robot_yaw_deg=byaw):
+                        for r in so.detect_seat_occupancy(scan, bx, by, direction, robot_yaw_deg=byaw):
                             truth = r.seat.index in occ
                             if r.state is so.Occupancy.UNKNOWN:
                                 unk += 1

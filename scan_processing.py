@@ -10,6 +10,18 @@ discussion this came out of -- the key points encoded here:
     reading and gives a flatness residual you can use to sanity-check that
     it really is a flat wall and not, e.g., two pillars that happened to
     cluster together.
+
+ANGLE CONVENTION (changed Sept 2026, see docs/CHANGES.md): every robot-frame
+angle in this codebase is CLOCKWISE from the robot's forward axis:
+0 = forward, 90 = right, 180 = back, 270 = left. The matching robot-frame
+cartesian axes are fwd_mm (+ ahead) and right_mm (+ to the right), so that
+angle = atan2(right, fwd). The sensor's raw angles are mapped into this frame
+once, by LIDAR_ANGLE_SIGN / LIDAR_ANGLE_ZERO_OFFSET_DEG (config.py).
+
+What this module is used for now: clean_and_project() (range filtering + the
+one place mount calibration is applied) feeds initialisation and the seat
+check; the clustering/classification only colours the point cloud on the
+dashboard. Initialisation does NOT use the clusters (it uses raw rays).
 """
 from __future__ import annotations
 
@@ -35,7 +47,7 @@ MAX_CLUSTER_SPAN_DEG = 110.0    # hard cap on a single cluster's angular extent.
                                  # smoothly bending around a real corner into the next wall) with no single
                                  # step big enough to trip the gap/chord thresholds, even though the result
                                  # spans two physically different, non-collinear surfaces. This is most
-                                 # visible near a section's corners; see the near-corner note in README.
+                                 # visible near a section's corners.
 MIN_QUALITY = 0                 # drop points below this quality value (set >0 if your unit reports noisy low-quality returns)
 MIN_RANGE_MM = 60.0             # drop points closer than the sensor's reliable minimum range
 MAX_RANGE_MM = 6000.0           # drop obviously-bad far returns
@@ -54,16 +66,13 @@ MIN_POINTS_PER_PILLAR = 2             # reject singleton-point fragments
 
 @dataclass
 class ScanPoint:
-    angle_deg: float   # CORRECTED robot-frame angle (angle_sign/angle_zero_offset_deg
-                        # already applied) -- same convention as x_mm/y_mm below, and
-                        # the same one BROADSIDE_HEADING_DEG/front=0/back=180/left=90/
-                        # right=270 downstream code assumes. NOT the sensor's raw angle
-                        # -- see the note on clean_and_project below for why that
-                        # distinction matters.
+    angle_deg: float   # CORRECTED robot-frame angle, CLOCKWISE (0=forward, 90=right,
+                        # 180=back, 270=left), angle_sign/angle_zero_offset_deg already
+                        # applied. NOT the sensor's raw angle -- see clean_and_project.
     dist_mm: float
     quality: int
-    x_mm: float = 0.0  # robot-relative cartesian, +X = robot forward, +Y = robot left
-    y_mm: float = 0.0
+    fwd_mm: float = 0.0    # robot-relative cartesian: + ahead of the sensor
+    right_mm: float = 0.0  # robot-relative cartesian: + to the sensor's right
 
 
 @dataclass
@@ -73,58 +82,61 @@ class Cluster:
     arc_length_mm: float
     mean_range_mm: float
     kind: str                         # "wall" | "pillar" | "unclassified"
-    line_normal: tuple[float, float] | None = None   # unit normal, robot frame
+    line_normal: tuple[float, float] | None = None   # unit normal, robot frame (fwd, right)
     line_distance_mm: float | None = None             # perpendicular distance from robot origin to the fitted line
     flatness_residual_mm: float | None = None
     centroid: tuple[float, float] = field(default=(0.0, 0.0))
 
 
 def angle_to_xy(angle_deg: float, dist_mm: float, angle_sign: int = 1, angle_zero_offset_deg: float = 0.0):
-    """Robot-relative angle -> robot-relative cartesian.
-    +X = robot forward, +Y = robot left, matching BROADSIDE_HEADING_DEG's
-    "front/back" language used elsewhere.
+    """Raw sensor angle -> robot-relative cartesian (fwd_mm, right_mm).
+
+    The corrected angle a = angle_sign * raw + angle_zero_offset_deg is
+    CLOCKWISE from forward, so fwd = d*cos(a), right = d*sin(a)
+    (a = 90 -> straight right, a = 270 -> straight left).
 
     angle_sign / angle_zero_offset_deg absorb your specific mount: if your
-    LIDAR's angle increases clockwise and its own zero doesn't line up with
-    the chassis forward direction, calibrate these two numbers once and
-    every downstream angle is correct. See config.py.
+    unit's raw angle runs counter-clockwise, or its zero doesn't line up with
+    the chassis forward direction, calibrate these two numbers once and every
+    downstream angle is correct. See config.py.
     """
     a = math.radians(angle_sign * angle_deg + angle_zero_offset_deg)
-    x = dist_mm * math.cos(a)
-    y = dist_mm * math.sin(a)
-    return x, y
+    fwd = dist_mm * math.cos(a)
+    right = dist_mm * math.sin(a)
+    return fwd, right
 
 
 def clean_and_project(raw_points, angle_sign: int, angle_zero_offset_deg: float) -> list[ScanPoint]:
-    """FOUND WHILE CALIBRATING ON REAL HARDWARE: this used to store the raw
-    sensor angle in ScanPoint.angle_deg while computing x_mm/y_mm from the
-    CORRECTED (angle_sign/angle_zero_offset_deg-applied) angle -- two
-    different conventions on one object. That's harmless with the config.py
-    defaults (sign=+1, offset=0, i.e. raw==corrected), which is exactly why
-    it went unnoticed, but _find_wall_near() in localization.py searches
-    for clusters near robot-frame targets (0/90/180/270) by comparing
-    against ScanPoint.angle_deg directly -- so the moment a real,
-    non-trivial calibration is set, every direction search would silently
-    start looking in the wrong place. Now angle_deg is corrected too, so
-    it always matches x_mm/y_mm and the 0/90/180/270 targets stay correct
-    regardless of calibration."""
+    """Range/quality filtering + mount calibration, in one place.
+
+    ScanPoint.angle_deg holds the CORRECTED angle (angle_sign /
+    angle_zero_offset_deg applied), the same angle fwd_mm/right_mm are
+    computed from. Everything downstream (initialisation's 0/90/270 rays,
+    the gap test, the seat check) compares against ScanPoint.angle_deg
+    directly, so it must already be in the robot frame: CLOCKWISE,
+    0 = forward, 90 = right, 180 = back, 270 = left.
+
+    (History: this once stored the raw angle while computing x/y from the
+    corrected one -- harmless at sign=+1/offset=0, wrong the moment a real
+    calibration was set. Fixed before the Sept 2026 changes; kept.)"""
     pts = []
     for angle_deg, dist_mm, quality in raw_points:
         if dist_mm < MIN_RANGE_MM or dist_mm > MAX_RANGE_MM:
             continue
         if quality < MIN_QUALITY:
             continue
-        x, y = angle_to_xy(angle_deg, dist_mm, angle_sign, angle_zero_offset_deg)
+        fwd, right = angle_to_xy(angle_deg, dist_mm, angle_sign, angle_zero_offset_deg)
         corrected_angle = (angle_sign * angle_deg + angle_zero_offset_deg) % 360.0
-        pts.append(ScanPoint(angle_deg=corrected_angle, dist_mm=dist_mm, quality=quality, x_mm=x, y_mm=y))
+        pts.append(ScanPoint(angle_deg=corrected_angle, dist_mm=dist_mm, quality=quality,
+                             fwd_mm=fwd, right_mm=right))
     pts.sort(key=lambda p: p.angle_deg)
     return pts
 
 
 def _fit_line_tls(points: list[ScanPoint]) -> tuple[tuple[float, float], float, float]:
-    """Total-least-squares line fit through robot-relative (x,y) points.
+    """Total-least-squares line fit through robot-relative (fwd, right) points.
     Returns (unit_normal, distance_from_origin, rms_residual)."""
-    xy = np.array([[p.x_mm, p.y_mm] for p in points])
+    xy = np.array([[p.fwd_mm, p.right_mm] for p in points])
     centroid = xy.mean(axis=0)
     centered = xy - centroid
     # Smallest singular vector of the centered points = the line's normal direction.
@@ -165,7 +177,7 @@ def cluster_points(points: list[ScanPoint]) -> list[Cluster]:
         prev = groups[-1][-1]
         head = groups[-1][0]
         angle_gap = (p.angle_deg - prev.angle_deg) % 360.0
-        chord = math.hypot(p.x_mm - prev.x_mm, p.y_mm - prev.y_mm)
+        chord = math.hypot(p.fwd_mm - prev.fwd_mm, p.right_mm - prev.right_mm)
         running_span = (p.angle_deg - head.angle_deg) % 360.0
         if angle_gap <= MAX_ANGLE_GAP_DEG and chord <= MAX_CHORD_JUMP_MM and running_span <= MAX_CLUSTER_SPAN_DEG:
             groups[-1].append(p)
@@ -179,7 +191,7 @@ def cluster_points(points: list[ScanPoint]) -> list[Cluster]:
         arc_length = mean_range * math.radians(max(span, 0.01))
         c = Cluster(points=g, angular_span_deg=span, arc_length_mm=arc_length,
                     mean_range_mm=mean_range, kind="unclassified")
-        c.centroid = (sum(p.x_mm for p in g) / len(g), sum(p.y_mm for p in g) / len(g))
+        c.centroid = (sum(p.fwd_mm for p in g) / len(g), sum(p.right_mm for p in g) / len(g))
         if len(g) >= 3:
             normal, dist, rms = _fit_line_tls(g)
             c.line_normal, c.line_distance_mm, c.flatness_residual_mm = normal, dist, rms
