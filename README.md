@@ -152,6 +152,43 @@ the workable range for your own geometry; `dashboard_server.py`'s mock
 demo overrides the simulator's own default starting `along_mm` (50.0,
 right next to a corner) for exactly this reason.
 
+## Start-of-run candidate overlay (arrows + predicted LIDAR per leg)
+
+Once `compute_start_of_run_fix()` succeeds, the dashboard now draws, for each
+of the 8 candidates (`candidate_start_positions()` -- 4 legs x 2 axes), a
+colour-coded arrow AND that pose's **predicted LIDAR scan** superimposed on
+the mat: what the sensor *would* see if the robot were at that pose,
+ray-cast against the known walls + island by `scan_prediction.predict_scan_global()`.
+Each leg gets one colour (Okabe-Ito, colourblind-safe) shared by its arrow and
+its predicted point cloud; the `START CANDIDATES` side panel lists all 8 with
+their `(x, y)` and bearing. Compare the predicted clouds against the single
+real start-of-run scan to pick which leg the robot is actually on -- that's
+the one whose prediction lines up with the live points.
+
+The prediction models the **rear chassis blind arc** on purpose
+(`config.REAR_BLIND_ARC_CENTER_DEG` / `_WIDTH_DEG`, default 180 deg / 105 deg
+from the "Back reading dropped" section): the same wedge that's dead on real
+hardware is cut out of each prediction, so (a) a predicted cloud looks like a
+real return from this robot, not a full 360 deg sweep, and (b) the two heading
+variants at one leg differ (the blind wedge points a different way), making all
+8 overlays visually distinct. **Measure your unit's real blind wedge** off a
+raw scan dump (the empty angular gap in `_debug_dump_clusters` output) and set
+those two config values to match -- the defaults are the README's stated
+figures, not measured on your unit. Predictions are static (they depend only on
+the fixed candidate poses), so they're computed once at start-of-run and reused
+every frame -- not re-ray-cast at stream rate.
+
+**The candidates only appear when the start-of-run fix SUCCEEDS, which requires
+a genuine broadside placement** (robot stationary, parallel to the inner wall,
+facing the outer wall). If the one-time scan is taken while the robot is
+pointing *along* the lane, the fix rejects with "no wall cluster found for
+front" -- front (0 deg) sees a corner down the lane instead of the outer wall,
+and the two side rays see the ~1000 mm-apart lane walls instead of the far
+corners that should sum to ~3000 mm. No LIDAR angle calibration can fix that
+particular scan (rotating angle labels can't turn 1000 mm-apart walls into
+3000 mm-apart corners); the robot has to actually be broadside for the one-time
+reading. Place it broadside, or take the reading before it starts driving.
+
 ## Findings from actually building and testing this (read this part)
 
 A few things surfaced only once this got implemented and stress-tested in

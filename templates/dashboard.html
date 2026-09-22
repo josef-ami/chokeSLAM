@@ -25,6 +25,13 @@
   .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--muted); }
   .legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
   #reason { font-size: 12px; color: var(--muted); margin-top: 6px; word-break: break-word; }
+  .muted-note { font-size: 12px; color: var(--muted); padding: 6px 0; }
+  .cand-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; border-bottom: 1px solid #232c40; }
+  .cand-sw { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; }
+  .cand-tag { width: 26px; font-weight: 700; color: var(--ink); }
+  .cand-xy { flex: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .cand-hd { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .cand-hd em { font-style: normal; opacity: .7; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -51,11 +58,14 @@
     <div class="row"><span>along_mm (from left / right)</span><span id="startAlong">-</span></div>
     <div id="startReason"></div>
 
+    <h1 style="margin-top:18px">START CANDIDATES (4 legs &times; 2 axes)</h1>
+    <div id="candList"><div class="muted-note">No candidates &mdash; the start-of-run fix hasn&rsquo;t succeeded yet (needs a broadside placement).</div></div>
+
     <div class="legend">
       <div><span class="dot" style="background:var(--wallpt)"></span>wall points</div>
       <div><span class="dot" style="background:var(--pillarpt)"></span>pillar points</div>
       <div><span class="dot" style="background:var(--unpt)"></span>unclassified</div>
-      <div><span class="dot" style="background:var(--candidate)"></span>start candidates (solid=primary heading, dashed=+90&deg;)</div>
+      <div><span class="dot" style="background:var(--candidate)"></span>start candidates: each leg has a colour; arrow + matching dots = its predicted LIDAR (solid=broadside, dashed=+90&deg;)</div>
     </div>
   </div>
 </div>
@@ -142,39 +152,90 @@ function drawRobot(pose, color, filled) {
 
 function setText(id, text) { document.getElementById(id).textContent = text; }
 
-// One of the 8 start-of-run candidates: 4 sections x (primary broadside
-// heading, secondary = primary+90deg, shown only for the both-axes view).
-// Drawn smaller and dimmer than the live/true robot markers, with a
-// section-letter label so you can tell the 8 apart; secondary variants are
-// dashed to mark them as "not an actual broadside solution here".
-function drawCandidate(pose) {
-  const [px, py] = toCanvas(pose.x_mm, pose.y_mm);
-  const h = -pose.heading_deg * Math.PI / 180;
-  const dashed = pose.heading_variant === 'secondary';
+// 8 distinct, colourblind-safe colours (Okabe-Ito, black swapped to grey for
+// the dark mat), one per candidate by its stable `idx` from the server. The
+// arrow and its predicted-scan cloud share the candidate's colour so you can
+// tell the 8 overlays apart.
+const CAND_COLORS = ['#9aa0a6', '#E69F00', '#56B4E9', '#009E73',
+                     '#F0E442', '#0072B2', '#D55E00', '#CC79A7'];
+function candColor(idx) { return CAND_COLORS[idx % CAND_COLORS.length]; }
+function candLabel(c) { return c.section + (c.heading_variant === 'secondary' ? "'" : ''); }
+
+// The predicted LIDAR scan for a candidate: what the sensor WOULD see if the
+// robot were at this pose, ray-cast against walls+island with the rear blind
+// arc removed. Drawn as small dots in the candidate's colour so you can match
+// each predicted cloud to the single real scan and pick the right leg.
+function drawCandidatePrediction(c) {
+  const col = candColor(c.idx);
   ctx.save();
-  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--candidate');
-  ctx.lineWidth = 1.5;
-  ctx.globalAlpha = dashed ? 0.55 : 0.85;
-  if (dashed) ctx.setLineDash([3, 3]);
+  ctx.fillStyle = col;
+  ctx.globalAlpha = 0.5;
+  for (const p of c.predicted || []) {
+    const [px, py] = toCanvas(p.x, p.y);
+    ctx.beginPath();
+    ctx.arc(px, py, 1.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// One of the 8 start-of-run candidates: 4 legs x (primary broadside heading,
+// secondary = primary+90deg for the both-axes view). Arrow in the candidate's
+// colour; secondary variants dashed to mark them as "not an actual broadside
+// solution here". A distinct arrow is drawn for each of the 8.
+function drawCandidate(c) {
+  const [px, py] = toCanvas(c.x_mm, c.y_mm);
+  const h = -c.heading_deg * Math.PI / 180;
+  const dashed = c.heading_variant === 'secondary';
+  const col = candColor(c.idx);
+  ctx.save();
+  ctx.strokeStyle = col;
+  ctx.fillStyle = col;
+  ctx.lineWidth = 2;
+  ctx.globalAlpha = dashed ? 0.7 : 1.0;
+  if (dashed) ctx.setLineDash([4, 3]);
   ctx.beginPath();
-  ctx.arc(px, py, 6, 0, Math.PI * 2);
+  ctx.arc(px, py, 5, 0, Math.PI * 2);
   ctx.stroke();
   ctx.beginPath();
   ctx.moveTo(px, py);
-  ctx.lineTo(px + 15 * Math.cos(h), py + 15 * Math.sin(h));
+  ctx.lineTo(px + 26 * Math.cos(h), py + 26 * Math.sin(h));
   ctx.stroke();
   ctx.restore();
 
   ctx.save();
-  ctx.globalAlpha = dashed ? 0.55 : 0.9;
-  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--candidate');
-  ctx.font = '10px sans-serif';
-  ctx.fillText(pose.section + (dashed ? "'" : ''), px + 8, py - 8);
+  ctx.globalAlpha = 0.95;
+  ctx.fillStyle = col;
+  ctx.font = 'bold 11px sans-serif';
+  ctx.fillText(candLabel(c), px + 7 * Math.cos(h) + 6, py + 7 * Math.sin(h) - 6);
   ctx.restore();
 }
 
 function drawStartCandidates(candidates) {
+  // predicted clouds under the arrows, arrows on top
+  for (const c of candidates || []) drawCandidatePrediction(c);
   for (const c of candidates || []) drawCandidate(c);
+}
+
+// Numeric readout of the 8 candidates: colour swatch, label, (x,y), bearing.
+function renderCandidateTable(candidates) {
+  const box = document.getElementById('candList');
+  if (!candidates || !candidates.length) {
+    box.innerHTML = '<div class="muted-note">No candidates — the start-of-run fix hasn’t succeeded yet (needs a broadside placement).</div>';
+    return;
+  }
+  let html = '';
+  for (const c of candidates) {
+    const col = candColor(c.idx);
+    const variant = c.heading_variant === 'secondary' ? '+90°' : 'broadside';
+    html += `<div class="cand-row">`
+      + `<span class="cand-sw" style="background:${col}"></span>`
+      + `<span class="cand-tag">${candLabel(c)}</span>`
+      + `<span class="cand-xy">(${c.x_mm.toFixed(0)}, ${c.y_mm.toFixed(0)})</span>`
+      + `<span class="cand-hd">${c.heading_deg.toFixed(0)}° <em>${variant}</em></span>`
+      + `</div>`;
+  }
+  box.innerHTML = html;
 }
 
 function render(state) {
@@ -209,6 +270,8 @@ function render(state) {
     setText('startAlong', `${sfix.along_mm ?? '-'} (${sfix.along_mm_from_left ?? '-'} / ${sfix.along_mm_from_right ?? '-'})`);
     setText('startReason', sfix.reason || '');
   }
+
+  renderCandidateTable(state.start_candidates);
 }
 
 async function init() {

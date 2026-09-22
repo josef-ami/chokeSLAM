@@ -47,6 +47,19 @@ SECTION_LENGTH_TOLERANCE_MM = 60.0      # left+right distance sanity check: |sum
                                          # farther (up to ~3000mm vs ~1000mm), so the same angular/range noise
                                          # translates into a bigger absolute error at the far end.
 
+# --- Rear chassis blind arc (for the predicted-scan overlay) --------------
+# On real hardware a wedge of the LIDAR's view centred on the robot's rear is
+# permanently blocked by the chassis (see README "Back reading dropped": a
+# ~105deg dead zone centred almost exactly on 180deg robot-relative). This is
+# used by scan_prediction.predict_scan_global() to blank the same wedge out of
+# each candidate's PREDICTED scan, so the overlay matches this robot's real
+# (rear-occluded) field of view and the two heading variants at each leg look
+# different. Measure the real wedge off a raw scan dump (the empty angular gap
+# in dashboard_server._debug_dump_clusters output) and set these to match --
+# these defaults are the README's stated figures, not measured on your unit.
+REAR_BLIND_ARC_CENTER_DEG = 180.0   # robot-relative angle the wedge is centred on (180 = straight back)
+REAR_BLIND_ARC_WIDTH_DEG = 105.0    # total angular width of the blocked wedge
+
 # --- Dashboard / server ---------------------------------------------------
 DASHBOARD_HOST = "0.0.0.0"
 DASHBOARD_PORT = 5056

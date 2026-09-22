@@ -27,6 +27,7 @@ import config
 import mat_geometry as geo
 from localization import (PoseEstimator, candidate_start_positions,
                            compute_start_of_run_fix)
+from scan_prediction import predict_scan_global
 from scan_processing import process_scan
 
 app = Flask(__name__)
@@ -84,9 +85,24 @@ def _start_fix_to_dict(fix):
 
 
 def _candidates_to_list(candidates):
-    return [{"section": c.section, "heading_variant": c.heading_variant,
-             "x_mm": round(c.x_mm, 1), "y_mm": round(c.y_mm, 1), "heading_deg": round(c.heading_deg, 1)}
-            for c in candidates]
+    """Enrich each of the (up to 8) start-of-run candidates with its PREDICTED
+    LIDAR scan -- what the sensor would see IF the robot were at that pose --
+    ray-cast against walls+island with this robot's rear blind arc modelled
+    (see scan_prediction). `idx` is the candidate's stable index, which the
+    dashboard maps to a fixed colour so the arrow and its predicted cloud
+    share one colour. Predicted points are in GLOBAL mat coordinates, ready to
+    draw directly. NOTE: predictions are STATIC (they depend only on the fixed
+    candidate poses), so build this list ONCE at start-of-run and reuse it in
+    every published frame -- don't recompute the ray-casts at stream rate."""
+    out = []
+    for i, c in enumerate(candidates):
+        pred = predict_scan_global(c.x_mm, c.y_mm, c.heading_deg, n_points=90, model_blind_arc=True)
+        out.append({
+            "idx": i, "section": c.section, "heading_variant": c.heading_variant,
+            "x_mm": round(c.x_mm, 1), "y_mm": round(c.y_mm, 1), "heading_deg": round(c.heading_deg, 1),
+            "predicted": [{"x": px, "y": py} for px, py in pred],
+        })
+    return out
 
 
 def _debug_dump_clusters(clusters, label=""):
@@ -153,6 +169,8 @@ def _mock_mode_loop():
         _debug_dump_clusters(clusters, label="start-of-run, mock")
         initial_along_mm = 0.0
         start_candidates = []
+    # Build the candidate payload (poses + predicted scans) ONCE -- it's static.
+    start_candidates_payload = _candidates_to_list(start_candidates)
 
     estimator = PoseEstimator(initial_section="S", driving_direction="CCW", initial_along_mm=initial_along_mm)
     estimator.update_heading(heading)
@@ -198,7 +216,7 @@ def _mock_mode_loop():
             },
             "last_fix": _fix_to_dict(last_fix),
             "start_fix": _start_fix_to_dict(start_fix),
-            "start_candidates": _candidates_to_list(start_candidates),
+            "start_candidates": start_candidates_payload,
             "points": points,
             "pillars": [{"x_mm": p.x_mm, "y_mm": p.y_mm, "color": p.color} for p in sim.pillars],
             "t": time.time(),
@@ -242,6 +260,8 @@ def _real_mode_loop():
         _debug_dump_clusters(start_clusters, label="start-of-run, real")
         initial_along_mm = 0.0
         start_candidates = []
+    # Build the candidate payload (poses + predicted scans) ONCE -- it's static.
+    start_candidates_payload = _candidates_to_list(start_candidates)
 
     # --- INTEGRATION POINT --------------------------------------------
     # Plug your real starting section (still YOUR team's manual call --
@@ -289,7 +309,7 @@ def _real_mode_loop():
                                                       "front_distance_mm": None, "back_distance_mm": None,
                                                       "lane_sum_mm": None})()),
             "start_fix": _start_fix_to_dict(start_fix),
-            "start_candidates": _candidates_to_list(start_candidates),
+            "start_candidates": start_candidates_payload,
             "points": points,
             "pillars": [],
             "t": time.time(),
