@@ -22,6 +22,11 @@ Run:  python3 test_direction.py
 """
 from __future__ import annotations
 
+# The simulated worlds in this file are RULEBOOK fields: pin the lane width
+# before anything imports mat_geometry, whatever config.py is set to.
+import config
+config.LANE_WIDTH_MM = 1000.0
+
 import math
 import random
 
@@ -245,16 +250,16 @@ def test_undetermined_cases():
     # nothing at all
     r = dd.detect_direction([])
     assert r.direction is None
-    # a side ray missing entirely (e.g. inside a blind wedge)
+    # no wall on one side at all (nothing within +/-35 deg of 90)
     pts = scan_at("S", "CCW", 500.0, 1500.0, [], noise_mm=0.0, dropout=0.0)
-    pts_no_right = [(a, d) for a, d in pts if abs(a - 90.0) > 5.0]
+    pts_no_right = [(a, d) for a, d in pts if abs(a - 90.0) > 35.0]
     assert dd.detect_direction(pts_no_right).direction is None
     # openings on BOTH sides (synthetic: mirror the island-side returns onto the outer side)
     left = [(a, d) for a, d in pts if a > 180.0]
     mirrored = left + [((360.0 - a) % 360.0, d) for a, d in left]
     r = dd.detect_direction(mirrored)
     assert r.direction is None, r.reason
-    print("PASS  test_undetermined_cases       (no data / missing side ray / openings on both sides -> UNDETERMINED)")
+    print("PASS  test_undetermined_cases       (no data / no wall on a side / openings on both sides -> UNDETERMINED)")
 
 
 if __name__ == "__main__":

@@ -12,10 +12,13 @@ Pipeline (each step must succeed for the next to run):
   2. x           distance from the OUTER wall:
                      CCW (outer wall on the right): x = d(90)
                      CW  (outer wall on the left) : x = d(270)
-                 d(a) = median of the returns within +/- SIDE_RAY_HALF_WINDOW_DEG
-                 of a. Sanity check: d(90) + d(270) = LANE_WIDTH (1000) within
-                 LANE_WIDTH_TOLERANCE_MM, otherwise something is standing between
-                 the robot and a wall and x is REJECTED, not trusted.
+                 d(90) / d(270) = where the 90 / 270 ray meets that side's wall
+                 line, measured by direction_detect.measure_side_wall (the
+                 farthest well-supported straight line within +/-30 deg of
+                 abeam -- sees past a pillar beside the LIDAR; approved Sept 23,
+                 replacing the 2-deg ray median). Sanity check:
+                 d(90) + d(270) = config.LANE_WIDTH_MM within
+                 LANE_WIDTH_TOLERANCE_MM, otherwise x is REJECTED, not trusted.
 
   3. y           along the lane from the wall behind: y = 3000 - front, where
                  `front` is the distance to the wall ahead measured over a FAN:
@@ -48,19 +51,18 @@ from typing import Iterable
 import config
 import lane_frame as lf
 import seat_occupancy as so
-from direction_detect import DirectionResult, detect_direction, side_ray_distance
+from direction_detect import DirectionResult, WallFit, detect_direction, measure_side_wall
 
 LANE_LENGTH_MM = so.LANE_LENGTH_MM     # 3000, rule 13.1
-LANE_WIDTH_MM = so.LANE_WIDTH_MM       # 1000, rulebook section 8
 
 
 @dataclass
 class XReading:
     ok: bool
     reason: str = ""
-    d90_mm: float | None = None        # median range around 90 (right)
-    d270_mm: float | None = None       # median range around 270 (left)
-    lane_sum_mm: float | None = None   # d90 + d270, expected ~1000
+    d90_mm: float | None = None        # 90 ray -> right-hand wall line
+    d270_mm: float | None = None       # 270 ray -> left-hand wall line
+    lane_sum_mm: float | None = None   # d90 + d270, expected config.LANE_WIDTH_MM
     x_sensor_mm: float | None = None   # distance sensor -> outer wall
     x_mm: float | None = None          # reference point, after the lever arm
 
@@ -99,19 +101,24 @@ def detect_params_from_config(base: so.DetectParams | None = None) -> so.DetectP
     return p
 
 
-def measure_x(points: Iterable, direction: str) -> XReading:
-    pts = list(points)
-    d90 = side_ray_distance(pts, 90.0)
-    d270 = side_ray_distance(pts, 270.0)
+def measure_x(points: Iterable, direction: str,
+              walls: tuple[WallFit, WallFit] | None = None) -> XReading:
+    """walls = (left, right) WallFits already measured by the direction test
+    (reused so both steps see exactly the same walls); measured here if None."""
+    if walls is None:
+        pts = list(points)
+        walls = (measure_side_wall(pts, "left"), measure_side_wall(pts, "right"))
+    left, right = walls
+    d270 = left.d_ray_mm if left.ok else None
+    d90 = right.d_ray_mm if right.ok else None
     r = XReading(ok=False, d90_mm=d90, d270_mm=d270)
     if d90 is None or d270 is None:
-        r.reason = "no returns at " + ", ".join(n for n, d in (("90", d90), ("270", d270)) if d is None)
+        r.reason = "no wall at " + ", ".join(f"{n} ({w.reason})" for n, w in (("90", right), ("270", left)) if not w.ok)
         return r
     r.lane_sum_mm = d90 + d270
-    if abs(r.lane_sum_mm - LANE_WIDTH_MM) > config.LANE_WIDTH_TOLERANCE_MM:
-        r.reason = (f"d(90)+d(270) = {r.lane_sum_mm:.0f} mm, expected {LANE_WIDTH_MM:.0f} "
-                    f"+/- {config.LANE_WIDTH_TOLERANCE_MM:.0f}: something is between the robot "
-                    f"and a side wall (pillar abeam, limitation) -- x rejected")
+    if abs(r.lane_sum_mm - config.LANE_WIDTH_MM) > config.LANE_WIDTH_TOLERANCE_MM:
+        r.reason = (f"d(90)+d(270) = {r.lane_sum_mm:.0f} mm, expected {config.LANE_WIDTH_MM:.0f} "
+                    f"+/- {config.LANE_WIDTH_TOLERANCE_MM:.0f} (config.LANE_WIDTH_MM) -- x rejected")
         return r
     r.x_sensor_mm = d90 if direction == "CCW" else d270
     r.x_mm = r.x_sensor_mm + lf.handedness(direction) * config.LIDAR_OFFSET_LATERAL_MM
@@ -152,7 +159,7 @@ def initialise(points: Iterable, params: so.DetectParams | None = None) -> InitR
     d = detect_direction(pts)
     if d.direction is None:
         return InitResult(ok=False, reason=f"direction: {d.reason}", direction=d)
-    xr = measure_x(pts, d.direction)
+    xr = measure_x(pts, d.direction, walls=(d.left.fit, d.right.fit))
     yr = measure_y(pts)
     if not xr.ok or not yr.ok:
         why = "; ".join(f"{n}: {r.reason}" for n, r in (("x", xr), ("y", yr)) if not r.ok)

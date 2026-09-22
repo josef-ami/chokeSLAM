@@ -4,7 +4,7 @@ This is the running record of every change made to this repository from Septembe
 
 | Checkpoint | Content | Status |
 |---|---|---|
-| **A** | Clockwise conventions, lane frame with x from the outer wall, removal of mat-level code, simulator heading fix, **direction (gap) test**, **initialisation of x / y / seats** | Implemented and tested. **Awaiting your approval.** |
+| **A** | Clockwise conventions, lane frame with x from the outer wall, removal of mat-level code, simulator heading fix, **direction (gap) test**, **initialisation of x / y / seats** | Implemented and tested. First real-robot scan analysed (§5.7); two approved changes from it are implemented (A.2). **Awaiting your approval.** One open item: the LIDAR angle sign (§5.7.3). |
 | **B** | STM32 → Pi feed (BNO08x yaw + hall encoder), lane tracker, turn detection, lane switching, entry-corner seat re-check, simulated STM32 feed | Design agreed (§9). Not implemented. |
 | **C** | Dashboard rewritten lane-by-lane | Design agreed (§10). Not implemented. |
 
@@ -96,6 +96,9 @@ These are the owner's answers, numbered in the order they were asked.
 | 25 | Turn rule | **Approved:** ≥ 45° toward the round direction **and** tracked y ≥ 2000, or ≥ 80° alone as a failsafe |
 | 26 | Re-check alignment gate | **Only frames within ±20° of the new lane's grid north** |
 | 27 | Gap test vs placement yaw (after the WRONG finding, §5.2.6) | **Fit the wall tilt inside the gap test only.** x, y and seats keep yaw 0 |
+| 28 | (After the first real scan, §5.7) Lane width on the practice field | **About 930 mm by tape. Make it a config value** (`config.LANE_WIDTH_MM`). The rulebook's 1000 stays the default; the owner sets the field's measured width. Seat positions on such a field: to be asked separately |
+| 29 | (After the first real scan) Side-wall measurement | **Use the dominant wall line within ±30° of 90°/270°** instead of the 2° ray median (supersedes #10's measurement; x is still "the distance at 90° / 270°") |
+| 30 | (After the first real scan) Which side the pillar beside the robot was on | **The robot's right**, with the robot facing CCW and the LIDAR mounted upside down. This contradicts the scan under either sign (§5.7.3), so a sign-check scan is needed. **OPEN** |
 
 Pending your approval at checkpoint A:
 
@@ -103,6 +106,7 @@ Pending your approval at checkpoint A:
 - the single source of truth for the lever arm and blind wedge (§5.5)
 - the `run_init.py` review tool (§12)
 - the banner added to README.md
+- **A.2:** the implementation of #28 and #29, including the lane-width bound on the wall search (§5.2.2, step 1), and your real scan kept as a regression test (`test_data/`, `test_real_scans.py`)
 
 ## 4. Conventions
 
@@ -199,24 +203,25 @@ The matching gap behind the robot (y = 0–1000) is ignored. It lies mostly insi
 
 Angles are clockwise. The robot frame is (f, s), with f = r·cos a ahead and s = r·sin a to the right.
 
-**Step 1 – Side distances.**
-- d_right = median range of the returns within ±`SIDE_RAY_HALF_WINDOW_DEG` (2°) of 90°. d_left is the same around 270°.
-- If either is missing, the result is UNDETERMINED.
-- **Lane-sum precondition** (added at checkpoint A, pending approval): d_left + d_right must equal 1000 ± `LANE_WIDTH_TOLERANCE_MM` (40), otherwise UNDETERMINED. If the sum is off, one side ray isn't reaching its wall. A pillar abeam, for example, would otherwise become the "wall", and every ray past it would count as passing through.
+**Step 1 – Side walls** (`measure_side_wall`; decision #29, which replaced the 2° ray median after the first real scan, §5.7). For each side:
 
-**Step 2 – Wall-tilt fit.** This step was approved after the finding in §5.2.6.
-- For each side, take the returns within ±`GAP_FIT_HALF_DEG` (30°) of that side's 90°/270° whose s lies within `GAP_FIT_BAND_MM` (100) of +d_right (right side) or −d_left (left side).
-  - This band drops pillars, which stand at least 400 mm from either wall.
-  - It also drops rays that pass through a gap, and anything else that isn't the wall.
-- Fit a total-least-squares line through those points.
-- Drop points more than `GAP_FIT_INLIER_MM` (30) from the line and refit, up to three times.
-- A side counts as fitted with at least `GAP_FIT_MIN_POINTS` (10) inliers.
-- Combining the sides:
-  - **Both fitted:** their directions must agree within `GAP_FIT_AGREE_DEG` (2°), because the walls are parallel. Otherwise UNDETERMINED. The lane direction is the mean of the two.
-  - **One fitted:** the lane direction is that side's.
-  - **Neither fitted:** UNDETERMINED.
-- Each side wall is then modelled as the line along the lane direction through that side's inliers. If only the other side fitted, it goes through (0, ±d_side) instead.
-- The fit uses raw returns, **not** `scan_processing` clusters, so the cluster corner-merge problem (P1, §6) cannot affect it.
+1. Take the returns within ±`SIDE_WALL_HALF_DEG` (30°) of that side's 90° (right) or 270° (left), and their perpendicular distance |s|.
+2. Histogram |s| in `SIDE_WALL_BIN_MM` (20 mm) bins, each bin counted together with its two neighbours. **The wall is the farthest peak** that has at least `SIDE_WALL_MIN_POINTS` (10) returns **and** lies no more than `LANE_WIDTH_MM + LANE_WIDTH_TOLERANCE_MM` from the robot.
+   - Why the farthest: a pillar is always nearer than the wall behind it. In the real scan, the pillar beside the robot gave 17 returns at 165 mm and the wall behind it 42 at 453 mm.
+   - Why bounded by the lane width: without the bound, a robot level with the island's start picked the next lane's far outer wall (2300 mm away), seen through the opening behind it. That was found while implementing this and fixed before any results were reported. A side wall can never be farther than one lane width.
+   - Returns seen through an opening scatter in |s| rather than forming a peak.
+3. Fit a total-least-squares line to the returns within `SIDE_WALL_BAND_MM` (100) of that peak. Drop returns more than `SIDE_WALL_INLIER_MM` (30) off the line and refit, up to three times. At least 10 inliers must remain.
+4. **d_right / d_left = where the 90° / 270° ray meets that line.** This is still "the distance at 90° / 270°", now measured against the wall itself rather than whatever the single ray happens to hit.
+
+- No wall on a side gives UNDETERMINED.
+- **Lane-sum precondition** (pending approval): d_left + d_right must equal `config.LANE_WIDTH_MM` (rulebook 1000; set it to your field's width, decision #28) ± `LANE_WIDTH_TOLERANCE_MM` (40), otherwise UNDETERMINED.
+- The measurement uses raw returns, **not** `scan_processing` clusters, so the cluster corner-merge problem (P1, §6) cannot affect it.
+
+**Step 2 – Wall tilt.** This step was approved after the finding in §5.2.6.
+- The two fitted lines' directions must agree within `GAP_FIT_AGREE_DEG` (2°), because the walls are parallel. Otherwise UNDETERMINED.
+- The lane direction is the mean of the two.
+- Each side wall is modelled as the line along the lane direction through that side's inliers.
+- The tilt is used only here. x, y and the seats still take yaw = 0.
 
 **Step 3 – Classify the forward returns.** For every return in that side's forward quadrant (right: 0–90°, left: 270–360°):
 - Skip rays within `GAP_MIN_ANGLE_FROM_FWD_DEG` (1°) of dead-ahead, and rays whose crossing lies behind the robot.
@@ -292,13 +297,13 @@ The wrong cases are kept as a regression test, `test_previously_wrong_scenarios`
 
 ### 5.3 x: distance from the outer wall (`lane_init.measure_x`)
 
-- `d(90)` and `d(270)` are medians of the returns within ±2°, as in step 1 above.
-- **Sanity check:** `|d(90) + d(270) − 1000| ≤ LANE_WIDTH_TOLERANCE_MM (40)`, otherwise x is **rejected** with a reason, not trusted. This catches a pillar or limitation between the robot and a wall. In practice the gap test's identical precondition fails first.
+- `d(90)` and `d(270)` come from the same side-wall lines as the gap test (step 1 above; the direction test's fits are passed on so both steps see exactly the same walls).
+- **Sanity check:** `|d(90) + d(270) − LANE_WIDTH_MM| ≤ LANE_WIDTH_TOLERANCE_MM (40)`, otherwise x is **rejected** with a reason, not trusted. In practice the gap test's identical precondition fails first.
 - The sensor's distance to the outer wall is `x_sensor = d(90)` for CCW and `d(270)` for CW.
 - **Lever arm:** `x = x_sensor + h × LIDAR_OFFSET_LATERAL_MM`, with h = −1 for CCW and +1 for CW, and LATERAL positive to the robot's left.
   - Reasoning, CCW case: if the LIDAR is L to the left of the reference point, the reference point is L nearer the right-hand outer wall, so x_ref = x_sensor − L.
 
-Measured: median error 1.1 mm, max 5.5 mm. Accepted in 95% of simulated starts, and no accepted value was ever more than 30 mm off.
+Measured with the wall-line measurement: median error 0.2 mm, max 1.2 mm (it was 1.1 / 5.5 mm with the 2° rays). Accepted in 95% of simulated zone starts and 100% of lot starts. No accepted value was ever more than 30 mm off. A pillar 275 mm beside the LIDAR, which the 2° ray reads, no longer affects x (`test_pillar_beside_lidar`).
 
 ### 5.4 y: along the lane (`lane_init.measure_y`)
 
@@ -375,6 +380,59 @@ At initialisation, the robot stands between the seat rows. Seats beside it or be
 - `yaw_deg = 0`
 - `seats`: 6 `SeatReading`s with the state, a human-readable reason and every intermediate number
 
+### 5.7 The first real-robot scan (23 September)
+
+`run_init.py --real --dump scan.json` on the robot. The scan is kept as `test_data/real_2026-09-23_pillar_ahead_and_beside.json`, and `test_real_scans.py` replays it.
+
+Setup, as reported by the owner:
+- practice field
+- LIDAR mounted **upside down**
+- robot facing **CCW** along the track
+- one pillar ahead and one beside the robot, which the owner says was on the robot's **right**
+
+#### 5.7.1 What the scan contains
+
+Angles are raw, as read with `LIDAR_ANGLE_SIGN = +1`.
+
+| Raw angle | Content |
+|---|---|
+| 129°–233° | Chassis at 3–19 mm. The rear blind wedge **measures 105° wide, centred on 181°**, which matches config (180° / 105°). |
+| 352°–11° | A pillar dead ahead, its face at 143 mm |
+| 262°–278° | A pillar beside the LIDAR, its face at 165 mm (about 47 mm wide) |
+| 90° side | A straight wall at 474–478 mm, continuous to the wall ahead: the outer wall |
+| 270° side | A straight wall at 453–455 mm that ends about 600 mm ahead; past it, rays travel 1500–1960 mm. That is the island's end and the opening. |
+| about 330° | Something about 1 m away on the island wall's line, past its end. Probably a pillar in the next lane. |
+| ahead | The wall ahead at 1536 mm |
+
+Other readings:
+- The two side walls are **parallel** (fitted tilts −3.1° and −3.8°) and **926–934 mm apart**. The robot sat about 3.5° off parallel.
+- The opening from the island's end to the wall ahead measures about 930 mm. That is consistent with a 3000 mm outer square with about 930 mm lanes (island about 1140 mm).
+
+#### 5.7.2 Why initialisation refused, and what changed
+
+1. **The 2° ray at 270° read the pillar** (166 mm), not the wall behind it, so d(90) + d(270) = 637. This is P6, fixed by decision #29 (step 1 above).
+2. **The lane is about 930 mm, not 1000**, so the ±40 mm lane-width check would refuse this field at any pose. Fixed by decision #28: `config.LANE_WIDTH_MM` is set to the field's width.
+
+With both changes and `LANE_WIDTH_MM = 930`, the same scan initialises:
+
+```
+direction : CCW  -- gap on the LEFT: 809 mm open; right 0 mm; walls at -3.5 deg
+x         : 478 mm from the outer wall   (d90 478, d270 455, sum 933)
+y         : 1464 mm   (front 1536 mm; the single 0-deg ray reads the pillar at 146 mm)
+seats     : all six UNKNOWN (blind wedge, dead zone, or behind the pillar ahead)
+```
+
+#### 5.7.3 OPEN: the LIDAR angle sign
+
+The scan puts the pillar beside the robot and the island opening on the **same** side (raw 270°). So two of the reported facts can't both hold:
+
+- **Facing CCW** puts the island on the robot's **left**. Then raw 270° is left, `LIDAR_ANGLE_SIGN = +1` is correct, the answer above (CCW) is right, and the side pillar was on the left.
+- **Pillar on the right** makes raw 270° the right. Then `LIDAR_ANGLE_SIGN = −1`, the island was on the right, and the start was **CW**.
+
+Mounting upside down reverses the direction the sensor's angles run, so which sign is correct depends on the C1's native direction. That is not taken from a spec sheet. **The sign-check scan in §11 decides it.** Until then:
+- `config.LIDAR_ANGLE_SIGN` stays at +1.
+- `test_real_scans.py` asserts only what doesn't depend on the sign: the walls, the opening on the pillar's side, y, and that flipping the sign flips the answer and nothing else.
+
 ## 6. Problems found in the existing code, and what happened to each
 
 | ID | Problem | What happened |
@@ -388,6 +446,8 @@ At initialisation, the robot stands between the seat rows. Seats beside it or be
 | P3 | The mock simulator's heading formula (shared with `localization.driving_heading_deg`, "Finding 2" in the old `lane_frame.py`) pointed the robot 180° away from its direction of travel. | Simulator rewritten. Heading = the lane's grid north + yaw, derived from geometry (decision #12). |
 | P4 | Lever arm and blind wedge had two independent settings, one in `config.py` and one in `DetectParams`. | Unified (§5.5), pending approval. |
 | P5 | The parallel-wall gap model can give the WRONG direction under 2°+ placement yaw when a pillar hides the opening (§5.2.6). | Tilt fit inside the gap test (decision #27). |
+| P6 | (Real scan) The 2° ray median at 90°/270° reads a pillar standing beside the LIDAR instead of the wall behind it. | Side walls measured as the farthest well-supported line within ±30° (decision #29). |
+| P7 | (Real scan) The practice field's lane is about 930 mm, and the code assumed the rulebook's 1000. | `config.LANE_WIDTH_MM` (decision #28). |
 | — | `mat_geometry.all_slots()` placed the 24 seats at 250/750 mm × 500/1500/2500 mm, which disagrees with Fig. 11 on all 24. | Deleted with the rest of the mat-level code (decision #24). |
 
 ## 7. File-by-file changes (checkpoint A)
@@ -404,11 +464,12 @@ At initialisation, the robot stands between the seat rows. Seats beside it or be
 - `lane_init.py`: the initialisation pipeline (§5.1, §5.3–5.6)
 - `run_init.py`: command-line review tool (§12)
 - `test_direction.py`, `test_init.py`, `test_lane_frame.py`: verification (§8)
+- `test_real_scans.py` + `test_data/real_2026-09-23_pillar_ahead_and_beside.json`: regression on the first real scan (§5.7), pending approval (A.2)
 - `docs/CHANGES.md`: this document
 
 **Rewritten:**
 
-- `mat_geometry.py`: only the rulebook field geometry needed to build worlds (outer square, island). Removed: the slot table, broadside headings, section order, safe-fix zone and local↔global helpers.
+- `mat_geometry.py`: only the field geometry needed to build worlds (outer square, island). Removed: the slot table, broadside headings, section order, safe-fix zone and local↔global helpers. The lane width comes from `config.LANE_WIDTH_MM` (A.2), so the mock world matches the configured field; the island is 3000 − 2 × width.
 - `lane_frame.py`: x from the outer wall; handedness, bearing, unit-vector, lever-arm and corner-transform helpers. Removed: `lane_affine`, `convention_disagreements` (obsolete) and `robot_to_lane` / `sensor_origin` (replaced by `offset_in_lane`).
 - `simulation.py`:
   - clockwise ray-casting
@@ -421,7 +482,8 @@ At initialisation, the robot stands between the seat rows. Seats beside it or be
 - `config.py`:
   - clockwise documentation and a bench-check procedure for SIGN / OFFSET
   - removed parameters of deleted code: `BROADSIDE_HEADING_TOLERANCE_DEG`, `FRONT_BACK_SEARCH_WINDOW_DEG`, `SIDE_SEARCH_WINDOW_DEG`, `SECTION_LENGTH_TOLERANCE_MM`
-  - added the initialisation parameters: `SIDE_RAY_HALF_WINDOW_DEG`, `GAP_*`, `FRONT_FAN_HALF_DEG`, `FRONT_BAND_MM`
+  - added the initialisation parameters: `GAP_*`, `FRONT_FAN_HALF_DEG`, `FRONT_BAND_MM`
+  - A.2: added `LANE_WIDTH_MM` (field width, rulebook default 1000) and `SIDE_WALL_*` (side-wall measurement). The gap test's old `GAP_FIT_HALF/BAND/INLIER/MIN_POINTS` became `SIDE_WALL_*`. `SIDE_RAY_HALF_WINDOW_DEG` is kept for diagnostics only.
   - `MODE` left at your `"real"`
 
 **Modified:**
@@ -442,7 +504,7 @@ At initialisation, the robot stands between the seat rows. Seats beside it or be
 
 ## 8. Verification (checkpoint A)
 
-All four suites pass (`test_lane_frame.py`, `test_seat_occupancy.py`, `test_direction.py`, `test_init.py`).
+All five suites pass (`test_lane_frame.py`, `test_seat_occupancy.py`, `test_direction.py`, `test_init.py`, `test_real_scans.py`). The numbers below are after A.2. Every simulated-world suite pins `LANE_WIDTH_MM = 1000` (rulebook), whatever `config.py` says.
 
 The worlds are built in global coordinates from the rulebook geometry and ray-cast independently of the code under test. The tests' caster uses global grid bearings, not `lane_frame.bearing_of`.
 
@@ -470,8 +532,8 @@ Test-world assumptions shape only the scenarios, not the code:
 | opening geometry (noiseless) | Opening starts at the island's end (worst 17.7 mm); length 855–932 mm; outer side 0 everywhere |
 | zones, yaw 0 (640) | 616 correct, 24 UNDETERMINED, **0 wrong** |
 | zones, yaw 0, 360 rays/rev (320) | 305 / 15 / **0** |
-| zones, ±1 / 2 / 3 / 5 / 8° (640 each) | 618 / 616 / 613 / 611 / 608 correct; **0 wrong** |
-| parking, yaw 0 / ±5° (160 each) | 149 / 151 correct; **0 wrong** |
+| zones, ±1 / 2 / 3 / 5 / 8° (640 each) | 618 / 616 / 613 / 613 / 615 correct; **0 wrong** |
+| parking, yaw 0 / ±5° (160 each) | 160 / 160 correct; **0 wrong** (was 149 / 151 with the 2° rays) |
 | previously-wrong scenarios (50) | tilt-fitted **0 wrong**; old parallel model 30 wrong |
 | undetermined cases | No data, a missing side ray, or openings on both sides all give UNDETERMINED |
 
@@ -479,14 +541,23 @@ Test-world assumptions shape only the scenarios, not the code:
 
 | Test | Result |
 |---|---|
-| x / y, zones (640) | init ok 608 (95%), direction wrong 0, \|x err\| median 1.1 / max 5.3 mm, \|y err\| median 0.4 / max 2.1 mm |
-| x / y, parking (160) | init ok 152 (95%), \|x err\| max 5.5, \|y err\| max 4.0 |
-| lever arm (sensor 110 mm ahead, 60 mm left; 8 lane/direction combinations) | reference x, y within 0.1 mm |
-| pillar abeam | initialisation fails with the lane-sum reason, never an x |
+| x / y, zones (640) | init ok 608 (95%), direction wrong 0, \|x err\| median 0.2 / max 1.2 mm, \|y err\| median 0.4 / max 2.1 mm |
+| x / y, parking (160) | init ok 160 (100%), \|x err\| max 0.9, \|y err\| max 4.0 |
+| lever arm (sensor 110 mm ahead, 60 mm left; 8 lane/direction combinations) | reference x, y within 0.05 mm |
+| pillar beside the LIDAR (3 cases: outer side / island side, CCW / CW) | the 2° ray reads the pillar at 275 mm; the wall measurement gives x exactly (700 / 300 / 700) and initialisation succeeds |
 | pillar dead ahead | d(0) alone would give y = 2325 (truth 1300); the fan gives 1300 |
 | parking limitation ahead | d(0) alone would give y = 2775 (truth 1500); the fan gives 1500 |
-| seat verdicts, end to end | 4602 verdicts: 675 present, 1930 absent, 1997 unknown (43%); **0 false present, 0 false absent** |
-| placement yaw (info) | ±1 / 2 / 3°: x within 5.4 mm; y within 7 / 20 / 39 mm; 0 wrong seats |
+| seat verdicts, end to end | 4644 verdicts: 688 present, 1941 absent, 2015 unknown (43%); **0 false present, 0 false absent** |
+| placement yaw (info) | ±1 / 2 / 3°: x within 1.6 mm; y within 7 / 20 / 39 mm; 0 wrong seats |
+
+**`test_real_scans.py`** (your 23 Sept scan, `LANE_WIDTH_MM = 930`)
+
+| Test | Result |
+|---|---|
+| walls behind the side pillar | 455 / 478 mm (the 2° ray reads the pillar at 166 mm) |
+| opening | 809 mm on the pillar's side, 0 on the other |
+| y | 1464 mm (the 0° ray reads the pillar at 146 mm) |
+| sign mirror | flipping `LIDAR_ANGLE_SIGN` flips CCW ↔ CW and changes nothing else. The absolute answer waits on §5.7.3. |
 
 **`test_seat_occupancy.py`** (existing suite, new conventions)
 
@@ -587,9 +658,11 @@ Decisions #16, #21 and #22.
 
 | What | Where | How |
 |---|---|---|
-| LIDAR angle sign / zero | `config.LIDAR_ANGLE_SIGN`, `LIDAR_ANGLE_ZERO_OFFSET_DEG` | Put an object dead ahead (must read about 0°) and one on the robot's right (must read about 90°). If right reads about 270°, flip SIGN. If ahead isn't about 0°, set OFFSET. `run_init.py --real` then prints d90 / d270, which must match a tape measure to the right and left walls. |
+| **LIDAR angle sign: OPEN (§5.7.3)** | `config.LIDAR_ANGLE_SIGN` | The LIDAR is mounted upside down, which reverses its rotation sense, so measure the sign rather than infer it. Away from walls, put **one** object about 30 cm from the LIDAR on the robot's **right** (looking the way the robot faces), with nothing else within about 1 m, and run `run_init.py --real --dump sign.json`. The object must read about 90°. If it reads about 270°, set SIGN = −1. |
+| LIDAR zero offset | `LIDAR_ANGLE_ZERO_OFFSET_DEG` | An object dead ahead must read about 0°. In the 23 Sept scan the pillar ahead read 352–11° and the chassis wedge was centred on 181°, so 0 looks right. |
+| Lane width | `config.LANE_WIDTH_MM` | Tape the outer-to-island distance on the field you run on. Rulebook: 1000. Your practice field: about 930 (scan: 926–934). |
 | LIDAR lever arm | `config.LIDAR_OFFSET_FORWARD_MM`, `_LATERAL_MM` (+ left) | Measure from the pose reference point you want x and y to describe. |
-| Rear blind wedge | `config.REAR_BLIND_ARC_CENTER_DEG`, `_WIDTH_DEG` | The empty angular gap in a raw scan dump (`run_init.py --real --dump scan.json`). |
+| Rear blind wedge | `config.REAR_BLIND_ARC_CENTER_DEG`, `_WIDTH_DEG` | Measured on 23 Sept: 105° wide, centred on 181°. The config (180 / 105) already matches. |
 | Placement | — | Initialisation takes yaw = 0. y degrades by about 20 mm at 2° of placement yaw and about 40 mm at 3° (§5.4); the direction test is unaffected. |
 | (Checkpoint B) IMU yaw sign, encoder scale | `IMU_YAW_SIGN`, `ENCODER_MM_PER_COUNT` | Turn the robot clockwise by hand: the heading must increase. Roll a known distance to get mm per count. |
 
@@ -597,6 +670,7 @@ Decisions #16, #21 and #22.
 
 ```bash
 python3 test_lane_frame.py         # lane-frame geometry vs global geometry
+python3 test_real_scans.py         # replays your real scans (test_data/)
 python3 test_seat_occupancy.py     # seat detector, new conventions
 python3 test_direction.py          # gap test (a few minutes)
 python3 test_init.py               # x, y, seats end to end

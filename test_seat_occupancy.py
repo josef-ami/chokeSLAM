@@ -15,6 +15,11 @@ share it.
 """
 from __future__ import annotations
 
+# The simulated worlds in this file are RULEBOOK fields: pin the lane width
+# before anything imports mat_geometry, whatever config.py is set to.
+import config
+config.LANE_WIDTH_MM = 1000.0
+
 import math
 import random
 import statistics

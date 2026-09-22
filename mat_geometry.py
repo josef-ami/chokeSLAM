@@ -16,16 +16,21 @@ Dimensions, all from the WRO 2026 General Rules:
     - Sec 8  Obstacle Challenge: distance between the track borders is always
              1000 mm (+/- 10 mm at the International Final)
     - Fig 2 / Fig 11: the island is the centred 1000 x 1000 square
+The lane width is read from config.LANE_WIDTH_MM (rulebook default 1000) so a
+simulated world matches the field you've configured; the island is whatever
+the outer square leaves over (3000 - 2 x lane width).
 """
 from __future__ import annotations
 
+import config
+
 OUTER_SIZE_MM = 3000.0          # rule 13.1
-LANE_WIDTH_MM = 1000.0          # rulebook section 8, Obstacle Challenge rounds
-INNER_SIZE_MM = OUTER_SIZE_MM - 2 * LANE_WIDTH_MM   # island side length (1000)
+LANE_WIDTH_MM = config.LANE_WIDTH_MM   # rulebook: 1000 (section 8); config holds YOUR field's value
+INNER_SIZE_MM = OUTER_SIZE_MM - 2 * LANE_WIDTH_MM   # island side length (1000 on a rulebook field)
 
 # The island occupies the centred square [ISLAND_MIN, ISLAND_MAX] on both axes.
-ISLAND_MIN_MM = (OUTER_SIZE_MM - INNER_SIZE_MM) / 2.0   # 1000
-ISLAND_MAX_MM = ISLAND_MIN_MM + INNER_SIZE_MM           # 2000
+ISLAND_MIN_MM = (OUTER_SIZE_MM - INNER_SIZE_MM) / 2.0   # 1000 on a rulebook field
+ISLAND_MAX_MM = ISLAND_MIN_MM + INNER_SIZE_MM           # 2000 on a rulebook field
 
 # Axis-aligned boxes (x0, y0, x1, y1), handy for ray-casters.
 OUTER_BOX = (0.0, 0.0, OUTER_SIZE_MM, OUTER_SIZE_MM)

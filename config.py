@@ -39,34 +39,47 @@ LIDAR_OFFSET_LATERAL_MM = 0.0        # <-- FILL IN
 REAR_BLIND_ARC_CENTER_DEG = 180.0   # robot-relative angle the wedge is centred on
 REAR_BLIND_ARC_WIDTH_DEG = 105.0    # total angular width of the blocked wedge
 
-# --- Initialisation (LIDAR, once, robot stationary at its start pose) -----
-# All three steps assume the robot's yaw is exactly 0 (agreed): LIDAR 0 deg
-# is taken to be the lane's grid north. See lane_init.py / direction_detect.py.
-
-# Side rays: d(90) and d(270) are the MEDIAN of the returns within this many
-# degrees of 90 / 270. Used by the direction test and for x.
-SIDE_RAY_HALF_WINDOW_DEG = 2.0
-
-# x sanity check: d(90) + d(270) must equal the lane width within this
-# tolerance, otherwise something (a pillar abeam, a limitation) is standing
-# between the robot and a wall and x is rejected rather than trusted.
+# --- Field -----------------------------------------------------------------
+# Distance between the outer wall and the island wall. Rulebook (section 8,
+# Obstacle Challenge): always 1000 mm (+/- 10 at the International Final).
+# SET THIS TO YOUR FIELD'S TAPE-MEASURED WIDTH if it differs: every
+# "d(90) + d(270) = lane width" check uses it, and the mock world is built
+# with it. (Your practice field measured ~926-934 mm in the 23 Sept scan.)
+LANE_WIDTH_MM = 1000.0
+# d(90) + d(270) must equal LANE_WIDTH_MM within this tolerance, otherwise
+# a side reading isn't the wall (or the robot isn't in a lane) and
+# initialisation refuses rather than trusts it.
 LANE_WIDTH_TOLERANCE_MM = 40.0
+
+# --- Initialisation (LIDAR, once, robot stationary at its start pose) -----
+# x, y and the seat check take the robot's yaw as exactly 0 (agreed): LIDAR
+# 0 deg is the lane's grid north. See lane_init.py / direction_detect.py.
+
+# Side walls -- direction_detect.measure_side_wall(). Used for x, for the
+# lane-width check and by the gap test (approved Sept 23, replacing the 2-deg
+# ray median so a pillar beside the LIDAR can't stand in for the wall):
+#   1. take the returns within +/- SIDE_WALL_HALF_DEG of 90 (right) / 270 (left);
+#   2. histogram their perpendicular distance |s| in SIDE_WALL_BIN_MM bins;
+#      the WALL is the FARTHEST peak with at least SIDE_WALL_MIN_POINTS returns
+#      (a pillar is always nearer than the wall behind it);
+#   3. fit a straight line (total least squares) to the returns within
+#      SIDE_WALL_BAND_MM of that peak, dropping returns more than
+#      SIDE_WALL_INLIER_MM off the line and refitting (up to 3 times);
+#   4. d(90) / d(270) = where the 90 / 270 ray meets that line.
+SIDE_WALL_HALF_DEG = 30.0
+SIDE_WALL_BIN_MM = 20.0
+SIDE_WALL_BAND_MM = 100.0
+SIDE_WALL_INLIER_MM = 30.0
+SIDE_WALL_MIN_POINTS = 10
+# Diagnostics only (direction_detect.side_ray_distance): the old 2-deg median.
+SIDE_RAY_HALF_WINDOW_DEG = 2.0
 
 # Direction (gap) test -- direction_detect.py.
 GAP_MARGIN_MM = 80.0        # a return this much beyond the side-wall line = "passed through"
 GAP_OPEN_MIN_MM = 500.0     # the gap side needs at least this much opening (along the lane)
 GAP_CLOSED_MAX_MM = 150.0   # ...and the other side at most this much
 GAP_MIN_ANGLE_FROM_FWD_DEG = 1.0   # rays closer to dead-ahead than this are skipped (sin ~ 0)
-# Wall-tilt fit, used ONLY inside the gap test (approved after the yaw finding;
-# x, y and the seat check still take yaw = 0). Each side wall is fitted to the
-# raw returns within +/- GAP_FIT_HALF_DEG of 90 / 270 that lie within
-# GAP_FIT_BAND_MM of that side's d(90)/d(270) -- which drops pillars (>= 400 mm
-# from either wall) and rays passing through a gap.
-GAP_FIT_HALF_DEG = 30.0
-GAP_FIT_BAND_MM = 100.0
-GAP_FIT_INLIER_MM = 30.0     # robust refit: drop returns farther than this from the line
-GAP_FIT_MIN_POINTS = 10      # a side needs at least this many inliers to count as fitted
-GAP_FIT_AGREE_DEG = 2.0      # the two walls are parallel: fitted tilts must agree within this
+GAP_FIT_AGREE_DEG = 2.0     # the two side walls are parallel: fitted tilts must agree within this
 
 # y: front-wall fan -- lane_init.measure_y().
 FRONT_FAN_HALF_DEG = 30.0   # returns within +/- this of 0 deg are considered

@@ -79,7 +79,8 @@ import lane_frame as lf
 # Field constants (rulebook-derived -- see module docstring)
 # ---------------------------------------------------------------------------
 LANE_LENGTH_MM = 3000.0   # wall-to-wall along the direction of travel
-LANE_WIDTH_MM = 1000.0    # wall-to-wall across the lane
+LANE_WIDTH_MM = 1000.0    # wall-to-wall across the lane, RULEBOOK value (the seat table's frame).
+                          # The width the robot checks its readings against is config.LANE_WIDTH_MM.
 
 SEAT_X_MM = (400.0, 600.0)                 # from the OUTER wall (same numbers from either wall)
 SEAT_Y_MM = (1000.0, 1500.0, 2000.0)       # along travel, from the entry wall

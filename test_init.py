@@ -12,6 +12,11 @@ Run:  python3 test_init.py
 """
 from __future__ import annotations
 
+# The simulated worlds in this file are RULEBOOK fields: pin the lane width
+# before anything imports mat_geometry, whatever config.py is set to.
+import config
+config.LANE_WIDTH_MM = 1000.0
+
 import math
 import random
 import statistics
@@ -107,19 +112,25 @@ def test_lever_arm():
         config.LIDAR_OFFSET_FORWARD_MM, config.LIDAR_OFFSET_LATERAL_MM = saved
 
 
-def test_pillar_abeam_rejects_x():
-    """A pillar between the robot and a side wall makes d(90)+d(270) short:
-    initialisation must FAIL (the direction test's precondition catches it
-    first), never report an x."""
-    lane, direction = "E", "CCW"
-    # robot at y = 1500 beside the mid-outer seat (x = 400): pillar between it and the outer wall
-    x, y = 700.0, 1500.0
-    seat = [s for s in so.seats() if s.name == "mid-outer"][0]
-    boxes = [pillar_box(*lf.lane_to_global(lane, direction, seat.x_mm, seat.y_mm))]
-    res = li.initialise(to_points(scan_at(lane, direction, x, y, boxes, noise_mm=0.0, dropout=0.0)))
-    assert not res.ok and (res.x is None or not res.x.ok), res.reason
-    assert "d(90)+d(270)" in res.reason, res.reason
-    print(f"PASS  test_pillar_abeam_rejects     ({res.reason[:78]}...)")
+def test_pillar_beside_lidar():
+    """A pillar between the LIDAR and a side wall. The 2-deg ray at 90/270
+    reads the pillar (the first real scan, Sept 23, failed exactly like this);
+    the dominant-wall measurement must read the wall behind it, and x must be
+    right. Both directions, pillar on the outer side and on the island side."""
+    cases = [("E", "CCW", 700.0, 1500.0, "mid-outer"),   # pillar between robot and OUTER wall
+             ("W", "CW", 300.0, 1500.0, "mid-inner"),    # pillar between robot and ISLAND wall
+             ("S", "CW", 700.0, 1000.0, "near-outer")]
+    for lane, direction, x, y, seat_name in cases:
+        seat = [s for s in so.seats() if s.name == seat_name][0]
+        boxes = [pillar_box(*lf.lane_to_global(lane, direction, seat.x_mm, seat.y_mm))]
+        pairs = scan_at(lane, direction, x, y, boxes, noise_mm=0.0, dropout=0.0)
+        side = 90.0 if (seat.x_mm < x) == (direction == "CCW") else 270.0
+        ray = min(d for a, d in pairs if abs((a - side + 180) % 360 - 180) <= 2.0)
+        res = li.initialise(to_points(pairs))
+        assert res.ok, (lane, direction, res.reason)
+        assert abs(res.x.x_mm - x) < 10.0 and abs(res.y.y_mm - y) < 10.0, (res.x, res.y)
+        print(f"PASS  test_pillar_beside_lidar      {lane} {direction}: 2-deg ray at {side:.0f} reads {ray:.0f} mm "
+              f"(the pillar); wall measurement -> x {res.x.x_mm:.0f} (truth {x:.0f}), {res.direction.direction}")
 
 
 def test_pillar_ahead_does_not_fool_y():
@@ -199,7 +210,7 @@ def test_placement_yaw_effect():
 if __name__ == "__main__":
     test_x_y_accuracy()
     test_lever_arm()
-    test_pillar_abeam_rejects_x()
+    test_pillar_beside_lidar()
     test_pillar_ahead_does_not_fool_y()
     test_parking_limitation_does_not_fool_y()
     test_init_seats_never_wrong()
