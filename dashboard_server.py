@@ -190,7 +190,20 @@ def _real_mode_loop():
 
     lidar = RPLidarC1Source(config.LIDAR_PORT, config.LIDAR_BAUDRATE, config.LIDAR_SCAN_TIMEOUT_S)
     lidar.start()
-    time.sleep(0.5)  # let the rolling scan table fill in before trusting it for the start-of-run fix
+
+    # Give the background thread a few seconds to connect and start filling
+    # the scan table, polling rather than one fixed sleep -- if it's STILL
+    # empty after this, print full diagnostics instead of silently handing
+    # compute_start_of_run_fix() zero points (which just produces an opaque
+    # "no wall cluster found for front, back, left, right").
+    start_raw = []
+    for _ in range(10):
+        time.sleep(0.5)
+        start_raw = lidar.get_latest_scan()
+        if start_raw:
+            break
+    if not start_raw:
+        print(f"[start-of-run fix] no LIDAR points received after 5s -- lidar.status(): {lidar.status()}")
 
     # One-time start-of-run reading: robot stationary, already placed
     # broadside per your team's start procedure. Resolves along-track
@@ -198,7 +211,6 @@ def _real_mode_loop():
     # localization.compute_start_of_run_fix() -- and builds the 4-section
     # x 2-heading candidate list the dashboard displays for you to
     # visually cross-check.
-    start_raw = lidar.get_latest_scan()
     start_clusters = process_scan(start_raw, config.LIDAR_ANGLE_SIGN, config.LIDAR_ANGLE_ZERO_OFFSET_DEG)
     start_fix = compute_start_of_run_fix(start_clusters)
     if start_fix.ok:
