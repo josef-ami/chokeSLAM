@@ -8,6 +8,7 @@
     --bg: #0f1420; --panel: #161d2e; --ink: #e7ecf5; --muted: #8993a8;
     --lane: #1c2740; --island: #232e46; --wall: #4c5b7a;
     --ok: #3ecf8e; --bad: #e5556b; --wallpt: #5aa9ff; --pillarpt: #ffb454; --unpt: #556077;
+    --candidate: #ffd166;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink); font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
@@ -44,10 +45,18 @@
     <div class="row"><span>sum (expect ~1000)</span><span id="laneSum">-</span></div>
     <div id="reason"></div>
 
+    <h1 style="margin-top:18px">START-OF-RUN FIX (one-time)</h1>
+    <div class="row"><span>status</span><span id="startFixStatus">-</span></div>
+    <div class="row"><span>left / right (mm)</span><span id="startLeftRight">-</span></div>
+    <div class="row"><span>sum (expect ~3000)</span><span id="startSectionSum">-</span></div>
+    <div class="row"><span>along_mm (from left / right)</span><span id="startAlong">-</span></div>
+    <div id="startReason"></div>
+
     <div class="legend">
       <div><span class="dot" style="background:var(--wallpt)"></span>wall points</div>
       <div><span class="dot" style="background:var(--pillarpt)"></span>pillar points</div>
       <div><span class="dot" style="background:var(--unpt)"></span>unclassified</div>
+      <div><span class="dot" style="background:var(--candidate)"></span>start candidates (solid=primary heading, dashed=+90&deg;)</div>
     </div>
   </div>
 </div>
@@ -134,10 +143,46 @@ function drawRobot(pose, color, filled) {
 
 function setText(id, text) { document.getElementById(id).textContent = text; }
 
+// One of the 8 start-of-run candidates: 4 sections x (primary broadside
+// heading, secondary = primary+90deg, shown only for the both-axes view).
+// Drawn smaller and dimmer than the live/true robot markers, with a
+// section-letter label so you can tell the 8 apart; secondary variants are
+// dashed to mark them as "not an actual broadside solution here".
+function drawCandidate(pose) {
+  const [px, py] = toCanvas(pose.x_mm, pose.y_mm);
+  const h = -pose.heading_deg * Math.PI / 180;
+  const dashed = pose.heading_variant === 'secondary';
+  ctx.save();
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--candidate');
+  ctx.lineWidth = 1.5;
+  ctx.globalAlpha = dashed ? 0.55 : 0.85;
+  if (dashed) ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.arc(px, py, 6, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  ctx.lineTo(px + 15 * Math.cos(h), py + 15 * Math.sin(h));
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = dashed ? 0.55 : 0.9;
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--candidate');
+  ctx.font = '10px sans-serif';
+  ctx.fillText(pose.section + (dashed ? "'" : ''), px + 8, py - 8);
+  ctx.restore();
+}
+
+function drawStartCandidates(candidates) {
+  for (const c of candidates || []) drawCandidate(c);
+}
+
 function render(state) {
   drawField();
   drawPillars(state.pillars);
   drawPoints(state.points);
+  drawStartCandidates(state.start_candidates);
   if (state.true) drawRobot(state.true, '#8993a8', false);
   drawRobot(state.estimated, '#5aa9ff', true);
 
@@ -155,6 +200,16 @@ function render(state) {
     setText('frontBack', (fix.front_mm ?? '-') + ' / ' + (fix.back_mm ?? '-'));
     setText('laneSum', fix.lane_sum_mm ?? '-');
     setText('reason', fix.reason || '');
+  }
+
+  const sfix = state.start_fix;
+  const sbadge = document.getElementById('startFixStatus');
+  if (sfix) {
+    sbadge.innerHTML = `<span class="badge ${sfix.ok ? 'ok' : 'bad'}">${sfix.ok ? 'OK' : 'REJECTED'}</span>`;
+    setText('startLeftRight', (sfix.left_mm ?? '-') + ' / ' + (sfix.right_mm ?? '-'));
+    setText('startSectionSum', sfix.section_length_sum_mm ?? '-');
+    setText('startAlong', `${sfix.along_mm ?? '-'} (${sfix.along_mm_from_left ?? '-'} / ${sfix.along_mm_from_right ?? '-'})`);
+    setText('startReason', sfix.reason || '');
   }
 }
 

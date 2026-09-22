@@ -119,6 +119,159 @@ def compute_broadside_fix(clusters: list[Cluster], heading_deg: float, section: 
 
 
 @dataclass
+class StartOfRunFix:
+    """Result of the ONE-TIME start-of-run reading: uses all four cardinal
+    robot-relative directions (front=0, back=180, left=90, right=270) to
+    resolve BOTH lateral (cross-lane) and along-track position, without
+    assuming which of the 4 sections the robot is on.
+
+    Deliberately separate from BroadsideFix/compute_broadside_fix (which
+    needs a known `section` to check heading against, and which is what
+    every RE-fix after a corner turn keeps using): at true start-of-run we
+    don't have a section yet -- that's exactly what we can't resolve here
+    (see module docstring) -- so there's no specific target heading to
+    check against either. This trusts your team's placement procedure
+    (robot stationary, parallel to the inner wall, facing the outer wall)
+    rather than gating on IMU heading."""
+    ok: bool
+    reason: str = ""
+    front_distance_mm: float | None = None
+    back_distance_mm: float | None = None
+    lane_sum_mm: float | None = None
+    left_distance_mm: float | None = None
+    right_distance_mm: float | None = None
+    section_length_sum_mm: float | None = None
+    lateral_from_outer_mm: float | None = None
+    along_mm: float | None = None              # resolved along-track position (averaged)
+    along_mm_from_left: float | None = None    # diagnostic: independent estimate from the left (90deg) ray
+    along_mm_from_right: float | None = None   # diagnostic: independent estimate from the right (270deg) ray
+
+
+def compute_start_of_run_fix(clusters: list[Cluster]) -> StartOfRunFix:
+    """Call once, at the very start of the run, with the robot stationary
+    and already placed broadside per your team's start procedure.
+
+    Along-track derivation: for EVERY one of the 4 sections (verified
+    against mat_geometry._section_axes), a broadside robot's LEFT side
+    (90 deg robot-relative) points toward the far corner of whichever
+    section it's on (increasing along_mm), and its RIGHT side (270 deg)
+    points toward the near corner (along_mm=0) -- because "left"/"right"
+    for a broadside robot are exactly the section's own along-track axis.
+    So the same formula resolves along_mm regardless of which of the 4
+    legs the robot is actually on; it just can't tell you WHICH leg (see
+    module docstring) -- use candidate_start_positions() for that part.
+
+    Offset correction: only LIDAR_OFFSET_LATERAL_MM matters here (not
+    _FORWARD_MM) -- config.py's comment on that field already flags this.
+    A forward/back shift of the sensor doesn't change its perpendicular
+    distance to a wall running parallel to the direction of travel; a
+    left/right shift does. (Symmetric to compute_broadside_fix, which
+    only needs _FORWARD_MM for the same reason, just on the other axis.)
+
+    FOUND DURING TESTING, READ THIS BEFORE TRUSTING A STARTING along_mm:
+    this needs a noticeably wider safety margin from BOTH corners than
+    mat_geometry.SAFE_FIX_ALONG_MIN/MAX_MM (which only covers the back
+    ray missing the island) -- and, unlike that one, the workable window
+    isn't just "near the middle": simulation sweeps at various lateral
+    offsets found it can be a few hundred mm wide, well off-centre, or
+    (at some lateral values) not open anywhere in the section. The
+    mechanism: the near/far OUTER corners are real sharp 90-degree
+    corners too, same as the island's, so a side ray taken close enough
+    to one blends the perpendicular wall and the along-track wall into
+    one continuously-curving return -- clustering (correctly) refuses to
+    call that flat, and this fix (correctly) rejects it rather than
+    guessing -- but it means "front+back+left+right all resolve
+    cleanly" is a narrower, less predictable target than "just avoid the
+    island margin". Verify the workable range for your own robot's
+    geometry (dashboard_server.py overrides the mock demo's default
+    along_mm for exactly this reason) rather than assuming any particular
+    along/lateral combination will work.
+    """
+    front = _find_wall_near(clusters, 0.0, config.FRONT_BACK_SEARCH_WINDOW_DEG)
+    back = _find_wall_near(clusters, 180.0, config.FRONT_BACK_SEARCH_WINDOW_DEG)
+    left = _find_wall_near(clusters, 90.0, config.SIDE_SEARCH_WINDOW_DEG)
+    right = _find_wall_near(clusters, 270.0, config.SIDE_SEARCH_WINDOW_DEG)
+
+    missing = [name for name, c in (("front", front), ("back", back), ("left", left), ("right", right)) if c is None]
+    if missing:
+        return StartOfRunFix(ok=False, reason=(
+            f"no wall cluster found for {', '.join(missing)} (occluded, or thresholds too tight)"))
+
+    fwd_offset = config.LIDAR_OFFSET_FORWARD_MM
+    lat_offset = config.LIDAR_OFFSET_LATERAL_MM
+
+    front_d = front.line_distance_mm + fwd_offset
+    back_d = back.line_distance_mm - fwd_offset
+    lane_sum = front_d + back_d
+    if abs(lane_sum - geo.LANE_WIDTH_MM) > config.LANE_WIDTH_TOLERANCE_MM:
+        return StartOfRunFix(ok=False, reason=(
+            f"front+back = {lane_sum:.0f}mm, expected {geo.LANE_WIDTH_MM:.0f}mm "
+            f"+/- {config.LANE_WIDTH_TOLERANCE_MM:.0f} -- likely a pillar or corner return mistaken for a wall"),
+            front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=lane_sum)
+
+    # Raw, uncorrected -- the lateral offset cancels out of this sum (any
+    # point between two parallel walls has front+back-style distances that
+    # sum to the fixed gap between them, regardless of exactly where on
+    # that line the point sits), so this check doesn't need lat_offset.
+    left_d_raw = left.line_distance_mm
+    right_d_raw = right.line_distance_mm
+    section_length_sum = left_d_raw + right_d_raw
+    if abs(section_length_sum - geo.OUTER_SIZE_MM) > config.SECTION_LENGTH_TOLERANCE_MM:
+        return StartOfRunFix(ok=False, reason=(
+            f"left+right = {section_length_sum:.0f}mm, expected {geo.OUTER_SIZE_MM:.0f}mm "
+            f"+/- {config.SECTION_LENGTH_TOLERANCE_MM:.0f} -- likely a pillar blocking one of the side rays"),
+            front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=lane_sum,
+            left_distance_mm=left_d_raw, right_distance_mm=right_d_raw, section_length_sum_mm=section_length_sum)
+
+    along_from_right = right_d_raw - lat_offset
+    along_from_left = geo.OUTER_SIZE_MM - left_d_raw - lat_offset
+    along = (along_from_right + along_from_left) / 2.0
+
+    return StartOfRunFix(
+        ok=True,
+        front_distance_mm=front_d, back_distance_mm=back_d, lane_sum_mm=lane_sum,
+        left_distance_mm=left_d_raw, right_distance_mm=right_d_raw, section_length_sum_mm=section_length_sum,
+        lateral_from_outer_mm=front_d,
+        along_mm=along, along_mm_from_left=along_from_left, along_mm_from_right=along_from_right,
+    )
+
+
+@dataclass
+class CandidatePose:
+    """One of the possible global poses for the start-of-run fix. `section`
+    is which of the 4 legs this candidate assumes. `heading_variant` is
+    "primary" (that section's real broadside heading -- a genuine, valid
+    broadside solution IF this is the right section) or "secondary" (the
+    same point rotated +90 deg, shown only because you asked for both a
+    north-south- and east-west-facing marker at every candidate -- this is
+    NOT a physically valid broadside reading at this point, it's a visual
+    reference only)."""
+    section: geo.Section
+    heading_variant: str
+    x_mm: float
+    y_mm: float
+    heading_deg: float
+
+
+def candidate_start_positions(along_mm: float, lateral_mm: float) -> list[CandidatePose]:
+    """Expands one (along_mm, lateral_mm) pair -- section-independent, from
+    compute_start_of_run_fix() -- into all 8 candidate global poses: one
+    "primary" (true broadside heading) and one "secondary" (+90 deg from
+    primary, purely for the both-axes display) for each of the 4 sections.
+    Which one (if any) matches reality still has to come from your team
+    (e.g. watching the referee place the robot) -- see module docstring."""
+    out: list[CandidatePose] = []
+    for section in ("S", "E", "N", "W"):
+        x, y = geo.local_to_global(section, along_mm, lateral_mm)
+        primary_heading = geo.BROADSIDE_HEADING_DEG[section]
+        out.append(CandidatePose(section=section, heading_variant="primary",
+                                  x_mm=x, y_mm=y, heading_deg=primary_heading))
+        out.append(CandidatePose(section=section, heading_variant="secondary",
+                                  x_mm=x, y_mm=y, heading_deg=(primary_heading + 90.0) % 360.0))
+    return out
+
+
+@dataclass
 class PoseState:
     section: geo.Section
     along_mm: float

@@ -33,6 +33,15 @@ FRONT_BACK_SEARCH_WINDOW_DEG = 15.0     # how far from 0 deg / 180 deg (robot-re
                                          # nearby corner (see mat_geometry.SAFE_FIX_*_MM) and picking up the wrong,
                                          # much farther surface -- found during testing, not theoretical.
 
+# --- Start-of-run along-track fix (left/right, 90/270 deg robot-relative) --
+# Only used once, at the very start of the run, to resolve along-track
+# position from the two side rays -- see localization.compute_start_of_run_fix().
+SIDE_SEARCH_WINDOW_DEG = 15.0           # same idea as FRONT_BACK_SEARCH_WINDOW_DEG, for the 90/270 deg rays
+SECTION_LENGTH_TOLERANCE_MM = 60.0      # left+right distance sanity check: |sum - OUTER_SIZE_MM| must be under
+                                         # this. Wider than LANE_WIDTH_TOLERANCE_MM since the rays travel much
+                                         # farther (up to ~3000mm vs ~1000mm), so the same angular/range noise
+                                         # translates into a bigger absolute error at the far end.
+
 # --- Dashboard / server ---------------------------------------------------
 DASHBOARD_HOST = "0.0.0.0"
 DASHBOARD_PORT = 5056

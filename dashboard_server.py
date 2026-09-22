@@ -25,7 +25,8 @@ from flask import Flask, Response, render_template
 
 import config
 import mat_geometry as geo
-from localization import PoseEstimator
+from localization import (PoseEstimator, candidate_start_positions,
+                           compute_start_of_run_fix)
 from scan_processing import process_scan
 
 app = Flask(__name__)
@@ -68,23 +69,71 @@ def _fix_to_dict(fix):
     }
 
 
+def _start_fix_to_dict(fix):
+    if fix is None:
+        return None
+    r = lambda v: None if v is None else round(v, 1)
+    return {
+        "ok": fix.ok, "reason": fix.reason,
+        "front_mm": r(fix.front_distance_mm), "back_mm": r(fix.back_distance_mm), "lane_sum_mm": r(fix.lane_sum_mm),
+        "left_mm": r(fix.left_distance_mm), "right_mm": r(fix.right_distance_mm),
+        "section_length_sum_mm": r(fix.section_length_sum_mm),
+        "along_mm": r(fix.along_mm), "along_mm_from_left": r(fix.along_mm_from_left),
+        "along_mm_from_right": r(fix.along_mm_from_right),
+    }
+
+
+def _candidates_to_list(candidates):
+    return [{"section": c.section, "heading_variant": c.heading_variant,
+             "x_mm": round(c.x_mm, 1), "y_mm": round(c.y_mm, 1), "heading_deg": round(c.heading_deg, 1)}
+            for c in candidates]
+
+
 def _mock_mode_loop():
     from simulation import MockRobotSimulator
 
     sim = MockRobotSimulator(initial_section="S", direction="CCW")
-    # In this demo we happen to know the simulator's true starting along_mm,
-    # so we pass it through -- on the real robot, use whatever your team
-    # could observe about the random starting placement (see
-    # PoseEstimator's initial_along_mm docstring); if genuinely unknown,
-    # leave it at the default 0.0 and expect the along/x,y estimate (NOT
-    # the lateral fix, which is still accurate) to be off until the first
-    # corner turn resynchronises it.
-    estimator = PoseEstimator(initial_section="S", driving_direction="CCW", initial_along_mm=sim.along_mm)
+    # MockRobotSimulator's own default along_mm (50.0) sits right next to a
+    # corner -- too close for the new start-of-run left/right fix below to
+    # resolve (found during testing: with a wall corner that close, the
+    # near-corner wall return blends into the same merged/rejected cluster
+    # as the outer wall, exactly the kind of corner-blending effect
+    # mat_geometry.py already documents for the back/island reading, just
+    # from the opposite direction -- see compute_start_of_run_fix()'s
+    # docstring). Overridden here to a comfortably centred value so this
+    # demo actually exercises the new fix successfully; your team's real
+    # starting placement needs similar clearance from both corners -- you
+    # said yours always is, but if you see this fix reject unexpectedly on
+    # real hardware, corner proximity is the first thing to check.
+    sim.along_mm = 1500.0
 
     # One-time start-of-run reading, per the "good idea for bootstrapping"
-    # discussion: robot stationary and already placed broadside.
+    # discussion: robot stationary and already placed broadside. Used for
+    # TWO things now: (1) the usual lateral broadside fix, and (2) resolving
+    # along-track position from the left/right (90/270 deg) rays -- see
+    # localization.compute_start_of_run_fix(). Both come from the SAME scan.
     raw, heading = sim.broadside_scan()
     clusters = process_scan(raw, config.LIDAR_ANGLE_SIGN, config.LIDAR_ANGLE_ZERO_OFFSET_DEG)
+
+    start_fix = compute_start_of_run_fix(clusters)
+    if start_fix.ok:
+        initial_along_mm = start_fix.along_mm
+        # Section identity still can't come from the LIDAR alone (see
+        # localization.py's module docstring) -- "S" here is still YOUR
+        # team's manual call (e.g. watching the referee place the robot),
+        # same as before. start_candidates below is what the dashboard
+        # shows so you can visually confirm that call against all 4
+        # possibilities, one-time, at start-of-run only.
+        start_candidates = candidate_start_positions(start_fix.along_mm, start_fix.lateral_from_outer_mm)
+    else:
+        # Couldn't resolve along-track position (occlusion, bad geometry,
+        # etc.) -- fall back to 0.0 like before and flag it loudly rather
+        # than silently trusting a bad number.
+        print(f"[start-of-run fix] FAILED: {start_fix.reason} -- along_mm defaulting to 0.0")
+        initial_along_mm = 0.0
+        start_candidates = []
+
+    estimator = PoseEstimator(initial_section="S", driving_direction="CCW", initial_along_mm=initial_along_mm)
     estimator.update_heading(heading)
     last_fix = estimator.apply_lidar_fix(clusters)
 
@@ -127,6 +176,8 @@ def _mock_mode_loop():
                 "heading_deg": round(true.heading_deg, 1), "section": true.section,
             },
             "last_fix": _fix_to_dict(last_fix),
+            "start_fix": _start_fix_to_dict(start_fix),
+            "start_candidates": _candidates_to_list(start_candidates),
             "points": points,
             "pillars": [{"x_mm": p.x_mm, "y_mm": p.y_mm, "color": p.color} for p in sim.pillars],
             "t": time.time(),
@@ -139,12 +190,32 @@ def _real_mode_loop():
 
     lidar = RPLidarC1Source(config.LIDAR_PORT, config.LIDAR_BAUDRATE, config.LIDAR_SCAN_TIMEOUT_S)
     lidar.start()
+    time.sleep(0.5)  # let the rolling scan table fill in before trusting it for the start-of-run fix
+
+    # One-time start-of-run reading: robot stationary, already placed
+    # broadside per your team's start procedure. Resolves along-track
+    # position from the left/right (90/270 deg) rays -- see
+    # localization.compute_start_of_run_fix() -- and builds the 4-section
+    # x 2-heading candidate list the dashboard displays for you to
+    # visually cross-check.
+    start_raw = lidar.get_latest_scan()
+    start_clusters = process_scan(start_raw, config.LIDAR_ANGLE_SIGN, config.LIDAR_ANGLE_ZERO_OFFSET_DEG)
+    start_fix = compute_start_of_run_fix(start_clusters)
+    if start_fix.ok:
+        initial_along_mm = start_fix.along_mm
+        start_candidates = candidate_start_positions(start_fix.along_mm, start_fix.lateral_from_outer_mm)
+    else:
+        print(f"[start-of-run fix] FAILED: {start_fix.reason} -- along_mm defaulting to 0.0")
+        initial_along_mm = 0.0
+        start_candidates = []
 
     # --- INTEGRATION POINT --------------------------------------------
-    # Plug your real starting section (known from watching the referee's
-    # placement -- see localization.py's module docstring) and driving
-    # direction (as randomised/announced for the round) in here:
-    estimator = PoseEstimator(initial_section="S", driving_direction="CCW")
+    # Plug your real starting section (still YOUR team's manual call --
+    # section identity can't come from the LIDAR alone, see
+    # localization.py's module docstring; start_candidates above is what
+    # the dashboard shows so you can visually confirm this call) and
+    # driving direction (as randomised/announced for the round) in here:
+    estimator = PoseEstimator(initial_section="S", driving_direction="CCW", initial_along_mm=initial_along_mm)
 
     # You need to feed this estimator from your real STM32 telemetry:
     #   - call estimator.update_heading(imu_yaw_deg) whenever you get a new
@@ -183,6 +254,8 @@ def _real_mode_loop():
                                       type("F", (), {"ok": est.last_fix_ok, "reason": est.last_fix_reason,
                                                       "front_distance_mm": None, "back_distance_mm": None,
                                                       "lane_sum_mm": None})()),
+            "start_fix": _start_fix_to_dict(start_fix),
+            "start_candidates": _candidates_to_list(start_candidates),
             "points": points,
             "pillars": [],
             "t": time.time(),

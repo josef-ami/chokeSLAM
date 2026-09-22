@@ -36,7 +36,7 @@ robot passes through a corner.
 |---|---|
 | `mat_geometry.py` | Field constants (outer size, lane width, island, 4 sections, 24 slots) and section-local <-> global coordinate conversion. **Verify `OUTER_SIZE_MM` against your actual mat** -- it was read off the mat artwork, not stated explicitly in the rules pages we reviewed. |
 | `scan_processing.py` | Turns a raw scan into classified wall/pillar clusters (arc-length threshold, not point count; total-least-squares line fit for a denoised, sub-single-ray perpendicular distance). |
-| `localization.py` | The broadside fix (front=outer wall, back=inner wall, sanity-checks front+back≈1000mm) and `PoseEstimator`, which fuses it with odometry. |
+| `localization.py` | The broadside fix (front=outer wall, back=inner wall, sanity-checks front+back≈1000mm) and `PoseEstimator`, which fuses it with odometry. Also the one-time start-of-run fix (`compute_start_of_run_fix`, `candidate_start_positions`) -- see below. |
 | `lidar_source.py` | Real-hardware RPLidar C1 interface (untested, see above). |
 | `simulation.py` | Mock world + robot, used only in mock mode. |
 | `dashboard_server.py` | Flask app: runs the pipeline in a background thread, serves the dashboard over Server-Sent Events. |
@@ -62,6 +62,58 @@ your STM32 UART telemetry into `estimator.update_heading()` /
 `update_odometry()` / `on_corner_completed()`. That parsing lives on your
 Pi already and couldn't be written here without your protocol -- the
 integration points are commented inline.
+
+## Start-of-run: resolving along-track position and the 4-leg ambiguity
+
+The original design only ever resolved LATERAL (cross-lane) position from
+the broadside fix -- along-track position (`along_mm`, how far along the
+current section's edge you are) had to be typed in by hand
+(`initial_along_mm`), and which of the 4 sections (S/E/N/W) you're even on
+always has to be supplied (`initial_section`) -- neither is recoverable
+from the front/back reading alone.
+
+`compute_start_of_run_fix()` now also reads the LEFT (90 deg
+robot-relative) and RIGHT (270 deg) rays at the same one-time start-of-run
+moment. On every one of the 4 sections, a broadside robot's left/right axis
+runs exactly along the section's own along-track axis -- left always points
+toward the far corner, right toward the near corner (verified against
+`mat_geometry._section_axes` for all 4) -- so `along_mm = right_raw -
+LIDAR_OFFSET_LATERAL_MM`, cross-checked against `OUTER_SIZE_MM - left_raw -
+LIDAR_OFFSET_LATERAL_MM`, with a left+right≈`OUTER_SIZE_MM` sanity check
+(same spirit as the existing front+back≈1000mm one). This replaces the
+manual `initial_along_mm` guess with a real reading, for whichever section
+turns out to be the right one.
+
+It still can't tell you *which* section that is -- that's the same
+unresolvable gap the front/back fix always had, just now stated for
+along-track too. `candidate_start_positions()` takes the along/lateral pair
+and expands it into all 8 dashboard markers: one for each of the 4 sections
+x 2 headings (the section's real broadside heading, and that +90 degrees,
+purely so the dashboard can show both axis orientations at every
+candidate) -- shown once at start-of-run so your team can visually confirm
+which one matches where the robot was actually placed. This is a
+one-time DISPLAY addition only: the live-tracked pose still needs
+`initial_section` supplied manually, same as before, now just auto-filled
+with a real `along_mm` instead of a guess.
+
+**This is pickier than it looks -- read before relying on it.** Sweeping
+the mock simulator across along/lateral combinations (noiseless, to
+isolate the geometry from sensor noise) found the window where front,
+back, left, AND right *all* resolve cleanly is often much narrower than
+mat_geometry's existing back/island safe-zone margin, and not simply
+centred in the section -- at one lateral offset tested it was a ~250mm
+window near the middle, at another a ~30mm window near a corner, and at
+two others it didn't open anywhere in the section at all. Root cause:
+the near/far OUTER corners are real sharp 90-degree corners too, so a
+side ray taken too close to one blends the perpendicular wall and the
+along-track wall into one continuously-curving return, the same
+corner-blending effect already documented below for the back ray and the
+island -- clustering correctly refuses to call that flat, and this fix
+correctly rejects it (confirmed: no silent wrong answer), but it means
+you can't assume any particular starting spot works. Verify the workable
+range for your own geometry; `dashboard_server.py`'s mock demo overrides
+the simulator's own default starting `along_mm` (50.0, right next to a
+corner) for exactly this reason.
 
 ## Findings from actually building and testing this (read this part)
 
@@ -123,6 +175,14 @@ here rather than left for you to rediscover.
 - Playwright screenshot of the live dashboard confirming the point cloud
   visually aligns with the drawn walls/island and the estimated/true
   markers track together.
+- `compute_start_of_run_fix()`: verified against all 4 sections at a
+  centred along/lateral position (along/lateral estimate within ~1mm of
+  truth against the simulator's ground truth, with default noise/dropout
+  and default pillars; the matching candidate from `candidate_start_positions()`
+  reproduces the true x/y/heading), ~99% success rate (198/200) at that
+  same centred spot across repeated noisy trials, and the along/lateral
+  sweep (noiseless) described above that found how narrow the workable
+  window actually is.
 
 Not tested (couldn't be, in this sandbox): the real `rplidarc1` hardware
 path, and your actual STM32 telemetry integration.
