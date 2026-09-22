@@ -24,7 +24,9 @@ import time
 from flask import Flask, Response, render_template
 
 import config
+import lane_frame as lf
 import mat_geometry as geo
+import seat_occupancy as so
 from localization import (PoseEstimator, candidate_start_positions,
                            compute_start_of_run_fix)
 import scan_processing
@@ -47,7 +49,47 @@ _RT: dict = {
     "predict_n_points": 90, "freeze_pose": False,
     "estimator": None, "sim": None, "lidar": None,
     "start_fix": None, "start_candidates_payload": [],
+    # --- seat occupancy (the LANE view) ---------------------------------
+    # `seat_params` is the live DetectParams the tuning panel edits.
+    # `seat_memory` is the sticky map: once a seat has been decided
+    # OCCUPIED/EMPTY that verdict is held, because a seat that was resolved
+    # cleanly at 1.5 m is not re-opened just because the robot has since
+    # driven past it into the rear blind wedge. Cleared on every corner, since
+    # a new section means a new set of six seats.
+    "seat_params": so.DetectParams(),
+    "seat_sticky": True,
+    "seat_memory": {},          # seat index -> {"state", "reason", "at"}
+    "seat_yaw_offset_deg": 0.0,  # added to the lane-local yaw before detection
+    # Which pose the seat detector is fed. "estimated" is what the robot will
+    # actually have. "true" is mock-only and exists to separate two failure
+    # modes that otherwise look identical on screen: a seat called wrongly
+    # because the DETECTOR is wrong, versus one called wrongly because the
+    # POSE handed to it is wrong. Flip between them and whichever one changes
+    # the answer is the one at fault. (The detector is clean to ~50mm of
+    # position error and degrades past ~75mm; the mock's estimator holds
+    # lateral at a constant 500mm until a LIDAR fix succeeds, while the
+    # simulated robot wanders +/-120mm, so "estimated" is routinely outside
+    # that budget in mock mode.)
+    "seat_pose_source": "true",
 }
+
+
+class _ScanPose:
+    """A pose whose heading is the orientation a particular scan was captured
+    at, rather than the robot's nominal driving heading. Used on the frames
+    where the mock goes briefly broadside to re-anchor."""
+
+    __slots__ = ("section", "x_mm", "y_mm", "heading_deg")
+
+    def __init__(self, section, x_mm, y_mm, heading_deg):
+        self.section, self.x_mm, self.y_mm, self.heading_deg = \
+            section, x_mm, y_mm, heading_deg
+
+
+def _seat_memory_reset(why: str = ""):
+    _RT["seat_memory"] = {}
+    if why:
+        print(f"[seats] memory cleared ({why})")
 
 
 def _recompute_geo_derived():
@@ -142,6 +184,115 @@ def _candidates_to_list(candidates):
     return out
 
 
+def _rulebook_pillar_positions(section, direction, seat_indices):
+    """GLOBAL (x, y) of the given seat indices in `section`, using the
+    rulebook seat table from seat_occupancy.py.
+
+    Used only by the mock demo. simulation.MockRobotSimulator picks its default
+    pillars from mat_geometry.all_slots(), whose coordinates are Finding 1 --
+    they disagree with rulebook Figure 11 on all 24 slots. Overriding the
+    simulator's `pillars` attribute at runtime (rather than editing
+    simulation.py, which is left untouched) puts the mock pillars where the
+    detector is actually looking, so the lane view demonstrates something.
+    """
+    seats = {s.index: s for s in so.seats()}
+    return [lf.lane_to_global(section, direction, seats[i].x_mm, seats[i].y_mm)
+            for i in seat_indices if i in seats]
+
+
+def _truth_occupied_indices(pillars, section, direction, tol_mm=60.0):
+    """Which seat indices the mock's real pillars are standing on -- ground
+    truth for the lane view's TRUTH column. Returns None in real mode, where
+    there is nothing to compare against."""
+    if not pillars:
+        return []
+    out = []
+    for s in so.seats():
+        gx, gy = lf.lane_to_global(section, direction, s.x_mm, s.y_mm)
+        for p in pillars:
+            if math.hypot(p.x_mm - gx, p.y_mm - gy) <= tol_mm:
+                out.append(s.index)
+                break
+    return out
+
+
+def _seat_view(clusters, est, direction, truth_indices=None, pose_source="estimated"):
+    """Everything the LANE view needs: the lane-local pose, the six seats with
+    their live and sticky verdicts, and the affine transform the browser uses
+    to re-project the point cloud it already has.
+
+    The lane-local pose is derived from the estimator's GLOBAL x/y (via
+    lane_frame.pose_to_lane), not from its along_mm/lateral_mm, so this view is
+    a pure re-projection of the point the mat view draws. Both views therefore
+    agree with each other even while the localization findings are open.
+    """
+    p = _RT["seat_params"]
+    section = est.section
+    x_l, y_l, yaw = lf.pose_to_lane(section, direction, est.x_mm, est.y_mm,
+                                     est.heading_deg)
+    yaw = lf.wrap180(yaw + _RT["seat_yaw_offset_deg"])
+    sx, sy = lf.sensor_origin(x_l, y_l, yaw,
+                              p.lidar_offset_forward_mm, p.lidar_offset_lateral_mm)
+
+    points = [pt for c in clusters for pt in c.points]
+    readings = so.detect_seat_occupancy(points, x_l, y_l, robot_yaw_deg=yaw, params=p)
+
+    memory = _RT["seat_memory"]
+    seats_out = []
+    counts = {"occupied": 0, "empty": 0, "unknown": 0}
+    for r in readings:
+        live = r.state.value
+        if _RT["seat_sticky"]:
+            prev = memory.get(r.seat.index)
+            if r.state is not so.Occupancy.UNKNOWN:
+                if prev is None or prev["state"] != live:
+                    memory[r.seat.index] = {"state": live, "reason": r.reason,
+                                             "at": round(y_l, 0)}
+            held = memory.get(r.seat.index)
+        else:
+            held = {"state": live, "reason": r.reason, "at": round(y_l, 0)} \
+                if r.state is not so.Occupancy.UNKNOWN else None
+        shown = (held or {}).get("state", "unknown")
+        counts[shown] += 1
+        rnd = lambda v: None if v is None else round(v, 1)
+        seats_out.append({
+            "index": r.seat.index, "name": r.seat.name,
+            "x_mm": r.seat.x_mm, "y_mm": r.seat.y_mm,
+            "state": shown,                 # sticky (what the planner should use)
+            "live_state": live,             # this scan alone
+            "reason": r.reason,
+            "held_at_mm": (held or {}).get("at"),
+            "bearing_deg": rnd(r.predicted_bearing_deg),
+            "rel_bearing_deg": rnd(r.predicted_rel_bearing_deg),
+            "lidar_angle_deg": rnd(r.predicted_lidar_angle_deg),
+            "half_width_deg": rnd(r.search_half_width_deg),
+            "expected_centre_mm": rnd(r.expected_centre_mm),
+            "expected_face_mm": rnd(r.expected_face_mm),
+            "tolerance_mm": rnd(r.range_tolerance_mm),
+            "observed_mm": rnd(r.observed_range_mm),
+            "residual_mm": rnd(r.residual_mm),
+            "n_points": r.n_points_in_window,
+            "expected_hits": r.expected_hits,
+            "truth": None if truth_indices is None else (r.seat.index in truth_indices),
+        })
+
+    return {
+        "section": section, "direction": direction,
+        "grid_north_deg": round(lf.grid_north_bearing(section, direction), 1),
+        "outer_wall_side": "right" if lf.outer_wall_is_on_the_right(direction) else "left",
+        "lane_length_mm": lf.OUTER_SIZE_MM, "lane_width_mm": lf.LANE_WIDTH_MM,
+        "pose": {"x_mm": round(x_l, 1), "y_mm": round(y_l, 1), "yaw_deg": round(yaw, 1)},
+        "sensor": {"x_mm": round(sx, 1), "y_mm": round(sy, 1)},
+        "affine": [round(v, 6) for v in lf.lane_affine(section, direction)],
+        "blind_arc": {"center_deg": p.blind_arc_center_deg, "width_deg": p.blind_arc_width_deg},
+        "seats": seats_out,
+        "counts": counts,
+        "sticky": _RT["seat_sticky"],
+        "pose_source": pose_source,
+        "yaw_offset_deg": _RT["seat_yaw_offset_deg"],
+    }
+
+
 def _debug_dump_clusters(clusters, label=""):
     """Prints EVERY cluster (not just ones classified 'wall') with its
     robot-relative angle range and fit quality. Call this whenever
@@ -170,6 +321,44 @@ def _mock_mode_loop():
                 "initial_section": "S", "predict_n_points": 90, "freeze_pose": False})
     sim = MockRobotSimulator(initial_section="S", direction=DRIVING_DIRECTION)
     _RT["sim"] = sim
+    # Put the mock's pillars on RULEBOOK seats (see _rulebook_pillar_positions)
+    # so the lane view has something real to find. The simulator's own defaults
+    # come from mat_geometry.all_slots(), which is Finding 1. Runtime override
+    # only -- simulation.py is not edited.
+    # A plausible draw: a few seats filled in each of the four sections (the
+    # rules allow up to 7 red + 7 green across the 24 seats).
+    MOCK_LAYOUT = {"S": ((0, "red"), (3, "green"), (5, "red")),
+                   "E": ((1, "green"), (4, "red")),
+                   "N": ((2, "red"), (3, "green"), (4, "green")),
+                   "W": ((0, "green"), (5, "red"))}
+    from simulation import Pillar as _Pillar
+    sim.pillars = []
+    for _sec, _spec in MOCK_LAYOUT.items():
+        _idx = [i for i, _ in _spec]
+        for (gx, gy), (_, col) in zip(
+                _rulebook_pillar_positions(_sec, DRIVING_DIRECTION, _idx), _spec):
+            sim.pillars.append(_Pillar(gx, gy, col))
+    print(f"[seats] mock pillars placed on rulebook seats: "
+          f"{ {k: [i for i, _ in v] for k, v in MOCK_LAYOUT.items()} }")
+
+    # simulation.simulate_scan ray-casts a full, unobstructed 360 deg -- it
+    # models no chassis occlusion at all. Leaving the detector's blind wedge at
+    # its real-hardware default here would throw away 105 deg of a sweep that
+    # actually has data in it, so it's zeroed for the mock only. On real
+    # hardware this must go back to the measured wedge (see config.py), because
+    # there the returns genuinely are not there.
+    _RT["seat_params"].blind_arc_width_deg = 0.0
+    print("[seats] blind_arc_width_deg = 0 for the mock (simulate_scan casts a "
+          "full 360 deg); restore the measured wedge on real hardware")
+    # NOTE the yaw is left HONEST (seat_yaw_offset_deg = 0). The simulator
+    # reports a heading 180 deg from its own direction of travel -- Finding 2,
+    # simulation.true_heading_deg and localization.driving_heading_deg share
+    # the inverted formula -- and casts its scans at that same heading, so pose
+    # and scan stay mutually consistent and the detector works correctly on
+    # them. What you will SEE in the lane view is the robot driving up the lane
+    # while pointing down it. That is Finding 2, drawn to scale; it is not a
+    # fault in the view, and it should disappear the moment that formula is
+    # corrected.
     # MockRobotSimulator's own default along_mm (50.0) sits right next to a
     # corner, too close for the start-of-run fix to resolve cleanly. Overridden
     # to a comfortably centred value so this demo exercises the fix; your real
@@ -230,7 +419,17 @@ def _mock_mode_loop():
         if corner_completed and not _RT["freeze_pose"]:
             estimator.on_corner_completed()   # advance section / reset along_mm, no fix yet
             awaiting_fix = True
+            # New section => a different six seats. Nothing learned about the
+            # last section's seats carries over.
+            _seat_memory_reset(f"corner completed, now on section {estimator.state.section}")
 
+        # The orientation the scan below is actually taken at. On the frames
+        # where the robot goes briefly broadside for its re-anchor, the scan is
+        # NOT taken at the driving heading -- and anything that interprets a
+        # scan against a pose has to use the heading that scan was captured at,
+        # not the one the robot is nominally driving. (The lane view is what
+        # surfaced this: seats with pillars on them were reading EMPTY on
+        # exactly the frames a broadside fix fired.)
         if awaiting_fix and estimator.in_safe_fix_zone():
             # Briefly broadside for the re-anchor, then straighten back out.
             raw, broadside_heading = sim.broadside_scan()
@@ -239,13 +438,29 @@ def _mock_mode_loop():
             last_fix = estimator.apply_lidar_fix(clusters)
             estimator.update_heading(heading_deg)  # restore driving heading
             awaiting_fix = False
+            scan_heading = broadside_heading
         else:
             raw = sim.current_scan()
             clusters = process_scan(raw, config.LIDAR_ANGLE_SIGN, config.LIDAR_ANGLE_ZERO_OFFSET_DEG)
+            scan_heading = None   # scan matches the pose's own heading
 
         est = estimator.state
         true = sim.true_state()
         points = _clusters_to_points(clusters, est.x_mm, est.y_mm, est.heading_deg)
+        # In mock mode the seat detector can be fed either pose -- see
+        # _RT["seat_pose_source"]. `true` also carries section/x/y/heading, so
+        # it drops straight into _seat_view in place of the estimator state.
+        _src = _RT["seat_pose_source"]
+        _seat_pose = true if _src == "true" else est
+        if scan_heading is not None:
+            # Same position, but the heading this scan was actually captured at.
+            _seat_pose = _ScanPose(_seat_pose.section, _seat_pose.x_mm,
+                                   _seat_pose.y_mm, scan_heading)
+        seat_view = _seat_view(clusters, _seat_pose,
+                               _RT["driving_direction"],
+                               truth_indices=_truth_occupied_indices(
+                                   sim.pillars, est.section, _RT["driving_direction"]),
+                               pose_source=_src)
 
         _publish({
             "mode": "mock",
@@ -263,6 +478,7 @@ def _mock_mode_loop():
             "start_candidates": _RT["start_candidates_payload"],
             "points": points,
             "pillars": [{"x_mm": p.x_mm, "y_mm": p.y_mm, "color": p.color} for p in sim.pillars],
+            "seat_view": seat_view,
             "t": time.time(),
         })
         time.sleep(dt)
@@ -360,6 +576,10 @@ def _real_mode_loop():
         clusters = process_scan(raw, config.LIDAR_ANGLE_SIGN, config.LIDAR_ANGLE_ZERO_OFFSET_DEG)
         est = estimator.state
         points = _clusters_to_points(clusters, est.x_mm, est.y_mm, est.heading_deg)
+        # No ground truth in real mode -- truth_indices stays None, and the
+        # lane view's TRUTH column shows a dash instead of a comparison.
+        seat_view = _seat_view(clusters, est, _RT["driving_direction"],
+                               truth_indices=None, pose_source="estimated")
         _publish({
             "mode": "real",
             "estimated": {
@@ -376,6 +596,7 @@ def _real_mode_loop():
             "start_candidates": _RT["start_candidates_payload"],
             "points": points,
             "pillars": [],
+            "seat_view": seat_view,
             "t": time.time(),
         })
         time.sleep(dt)
@@ -396,6 +617,30 @@ def api_field():
         "island_min_mm": geo.ISLAND_MIN_MM,
         "island_max_mm": geo.ISLAND_MAX_MM,
         "slots": slots,
+        # --- lane view -----------------------------------------------------
+        # `slots` above is mat_geometry's table (Finding 1: it disagrees with
+        # rulebook Figure 11 on all 24). `lane.seats` is the rulebook table the
+        # detector actually uses. Both are sent so the mat view can draw the
+        # old one faintly and the difference stays visible rather than being
+        # quietly papered over.
+        "lane": {
+            "length_mm": lf.OUTER_SIZE_MM,
+            "width_mm": lf.LANE_WIDTH_MM,
+            "section_y_min_mm": min(so.SEAT_Y_MM),
+            "section_y_max_mm": max(so.SEAT_Y_MM),
+            "seat_x_mm": list(so.SEAT_X_MM),
+            "seat_y_mm": list(so.SEAT_Y_MM),
+            "seat_size_mm": so.PILLAR_SIDE_MM,
+            "seat_circle_dia_mm": 85.0,
+            "seats": [{"index": s.index, "name": s.name,
+                        "x_mm": s.x_mm, "y_mm": s.y_mm} for s in so.seats()],
+        },
+        "rulebook_slots_global": [
+            {"x_mm": round(gx, 1), "y_mm": round(gy, 1), "section": sec, "index": s.index}
+            for sec in lf.SECTIONS for s in so.seats()
+            for gx, gy in [lf.lane_to_global(sec, _RT["driving_direction"], s.x_mm, s.y_mm)]
+        ],
+        "convention_warnings": lf.convention_disagreements(),
     }
 
 
@@ -451,6 +696,13 @@ def _set_driving_direction(v):
     est = _RT["estimator"]
     if est is not None:
         est._next_section = geo.NEXT_SECTION_CCW if v == "CCW" else geo.NEXT_SECTION_CW
+
+
+def _seat(name, kind, unit, imp, crit=False):
+    """A field of the live seat_occupancy.DetectParams instance."""
+    return {"name": name, "kind": kind, "unit": unit, "implication": imp, "critical": crit,
+            "options": None, "get": (lambda: getattr(_RT["seat_params"], name)),
+            "set": (lambda v: setattr(_RT["seat_params"], name, _coerce(kind, v)))}
 
 
 def _pose(name, field, unit, imp, options=None, kind="float"):
@@ -538,6 +790,26 @@ def _param_registry():
             _spc("PILLAR_MIN_ARC_LENGTH_MM", "float", "mm", "Lower arc bound for a pillar. Obstacle detection only."),
             _spc("PILLAR_MAX_ARC_LENGTH_MM", "float", "mm", "Upper arc bound for a pillar. Obstacle detection only."),
             _spc("MIN_POINTS_PER_PILLAR", "int", "", "Reject singleton-point pillar fragments. Obstacle detection only."),
+        ]},
+        {"group": "Seat occupancy (seat_occupancy.py)", "note": "Drives the LANE view. Applied LIVE on the next scan. Seat coordinates come from rulebook Figure 11, not from mat_geometry's slot table.", "params": [
+            _run("seat_pose_source", "enum", "seat_pose_source", "", "Which pose the detector is fed. MOCK ONLY: 'true' uses the simulator's ground truth, 'estimated' uses the pose estimator. Flip between them to tell a detector fault from a localization fault -- whichever one changes the verdict is the one at fault. Real mode always uses 'estimated'.", True, options=["true", "estimated"]),
+            _run("seat_sticky", "bool", "seat_sticky", "", "Hold each seat's first OCCUPIED/EMPTY verdict instead of re-deciding every scan. A seat resolved cleanly at 1.5m shouldn't re-open just because you've driven past it into the blind wedge. Cleared at every corner."),
+            _run("seat_yaw_offset_deg", "float", "seat_yaw_offset_deg", "deg", "Added to the lane-local yaw before detection. Non-zero if your IMU's zero isn't grid north. In MOCK mode this defaults to 180 to compensate Finding 2 (simulation.py reports a heading opposite its own travel) -- set it to 0 once that's fixed.", True),
+            _seat("angular_margin_deg", "float", "deg", "Search half-window around each seat's predicted bearing, ON TOP of the pillar's own subtense. Size it from heading uncertainty. Too tight => real pillars missed on a yawing car; too wide => a wall at the right range can enter the window.", True),
+            _seat("range_tol_mm", "float", "mm", "Absolute range agreement. Dominated by POSITION error, not sensor noise -- measured clean to 50mm pose error, degrading past 75mm.", True),
+            _seat("range_tol_frac", "float", "", "Range-proportional part of the tolerance, so a far seat is judged more leniently than a near one."),
+            _seat("min_points", "int", "", "Minimum contiguous returns to accept a pillar face. 1 lets a single stray point become an obstacle."),
+            _seat("max_width_factor", "float", "x", "Reject a run wider than this multiple of the pillar's predicted angular width -- that's a wall passing through the right range, not a 50mm pillar."),
+            _seat("max_range_step_mm", "float", "mm", "Consecutive points further apart than this in range are not the same surface. Sets where a candidate run is broken."),
+            _seat("blind_arc_center_deg", "float", "deg", "Robot-relative centre of the chassis-blocked wedge. Seats inside it report UNKNOWN, never EMPTY."),
+            _seat("blind_arc_width_deg", "float", "deg", "Total width of that wedge. Measure it off a raw scan dump on your unit."),
+            _seat("min_expected_hits", "float", "returns", "Before calling a seat EMPTY, require that a pillar standing there would have produced at least this many returns at the scan's own measured angular resolution. Below it the verdict is UNKNOWN. Guards against a far pillar whose one-or-two returns were lost to dropout reading as 'empty' -- and EMPTY is the verdict that gets held.", True),
+            _seat("min_observable_face_mm", "float", "mm", "A seat nearer than this is inside the sensor dead zone -> UNKNOWN. Without it a seat passing beside the robot reads EMPTY and un-sets an earlier correct OCCUPIED.", True),
+            _seat("seat_position_slack_mm", "float", "mm", "Slack for a sign nudged inside its 85mm circle, plus mat print tolerance."),
+            _seat("lidar_offset_forward_mm", "float", "mm", "Sensor lever arm, forward of the pose reference point. Separate from config.LIDAR_OFFSET_* -- this one shifts the SEAT vectors."),
+            _seat("lidar_offset_lateral_mm", "float", "mm", "Sensor lever arm, to the robot's LEFT. With a 300x200mm vehicle this is not a rounding error."),
+            _seat("min_range_mm", "float", "mm", "Returns closer than this are discarded before detection."),
+            _seat("max_range_mm", "float", "mm", "Returns further than this are discarded before detection."),
         ]},
         {"group": "Overlay & server", "note": "", "params": [
             _run("predict_n_points", "int", "predict_n_points", "", "Angular resolution of each candidate's predicted cloud. Higher = denser overlay, bigger payload. Purely visual; click Re-run fix to apply."),
@@ -639,6 +911,16 @@ def api_param():
 @app.route("/api/refit", methods=["POST"])
 def api_refit():
     return _rerun_start_fix()
+
+
+@app.route("/api/seats/reset", methods=["POST"])
+def api_seats_reset():
+    """Forget every held seat verdict for the current section and start
+    deciding again from the next scan. Use it after moving pillars on the
+    bench, or after changing a detector threshold, so you're not looking at a
+    verdict formed under the old settings."""
+    _seat_memory_reset("manual reset from the dashboard")
+    return {"ok": True}
 
 
 @app.route("/api/reset", methods=["POST"])

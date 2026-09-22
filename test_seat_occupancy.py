@@ -14,40 +14,13 @@ import statistics
 from itertools import combinations
 
 import seat_occupancy as so
+from lane_frame import (LANE_WIDTH_MM as LANE_W, OUTER_SIZE_MM as OUTER,
+                        SECTIONS as LANES, global_to_lane, lane_to_global)
+from lane_frame import grid_north_bearing as lane_grid_north_bearing
 
 random.seed(20260922)
 
-OUTER = 3000.0
-LANE_W = 1000.0
 ISLAND_MIN, ISLAND_MAX = 1000.0, 2000.0
-
-# lane -> (outer-wall inward normal, {direction: (entry corner, travel unit)})
-LANES = {
-    "S": ((0.0, 1.0), {"CCW": ((0.0, 0.0), (1.0, 0.0)),
-                       "CW": ((OUTER, 0.0), (-1.0, 0.0))}),
-    "E": ((-1.0, 0.0), {"CCW": ((OUTER, 0.0), (0.0, 1.0)),
-                        "CW": ((OUTER, OUTER), (0.0, -1.0))}),
-    "N": ((0.0, -1.0), {"CCW": ((OUTER, OUTER), (-1.0, 0.0)),
-                        "CW": ((0.0, OUTER), (1.0, 0.0))}),
-    "W": ((1.0, 0.0), {"CCW": ((0.0, OUTER), (0.0, -1.0)),
-                       "CW": ((0.0, 0.0), (0.0, 1.0))}),
-}
-
-
-def lane_to_global(lane: str, direction: str, x_local: float, y_local: float):
-    """Lane-local (x from the LEFT wall, y along travel) -> global mat (x, y)."""
-    n, dirs = LANES[lane]
-    (ox, oy), (ux, uy) = dirs[direction]
-    d_outer = (LANE_W - x_local) if direction == "CCW" else x_local
-    return (ox + ux * y_local + n[0] * d_outer,
-            oy + uy * y_local + n[1] * d_outer)
-
-
-def lane_grid_north_bearing(lane: str, direction: str) -> float:
-    """Global grid bearing (0=+Y, 90=+X, clockwise) of this lane's grid north."""
-    _, dirs = LANES[lane]
-    _, (ux, uy) = dirs[direction]
-    return (90.0 - math.degrees(math.atan2(uy, ux))) % 360.0
 
 
 # ---------------------------------------------------------------- ray caster
@@ -121,9 +94,13 @@ def test_frame_maps_to_global():
             for s in so.seats():
                 gx, gy = lane_to_global(lane, direction, s.x_mm, s.y_mm)
                 got.add((round(gx), round(gy)))
+                # and the inverse the dashboard's lane view depends on
+                bx, by = global_to_lane(lane, direction, gx, gy)
+                assert abs(bx - s.x_mm) < 1e-9 and abs(by - s.y_mm) < 1e-9, \
+                    f"{lane}/{direction} {s.name}: round trip gave ({bx}, {by})"
         assert got == expected, f"{direction}: {sorted(got ^ expected)}"
     print("PASS  test_frame_maps_to_global      "
-          "(24 global seats reproduced, both directions)")
+          "(24 global seats reproduced + round-trip, both directions)")
 
 
 def test_bearing_conventions():
@@ -278,6 +255,39 @@ def test_drive_through_resolves_every_seat_in_time():
           f"the seat): {worst_lead:.0f} mm")
 
 
+def test_coarse_sampling_never_reports_false_empty():
+    """Regression. At 1 deg angular sampling a 50 mm pillar at ~1.7 m subtends
+    1.7 deg, so it returns one or two points and a dropout can leave one --
+    too few to certify as a pillar-shaped run. The detector must then say
+    UNKNOWN, never EMPTY: a return sitting AT the seat's range is ambiguous,
+    not evidence of absence.
+
+    This is what the dashboard's lane view caught by comparing live verdicts
+    against the mock's ground truth (simulation.simulate_scan sweeps 360
+    points, i.e. 1 deg, where the rest of this file uses 720)."""
+    false_empty = 0
+    checked = 0
+    for lane in LANES:
+        for direction in ("CCW", "CW"):
+            for occ in ({1, 4}, {0, 2, 5}, {3}):
+                for y in (0.0, 150.0, 300.0, 450.0, 600.0):
+                    x = 400.0
+                    rx, ry = lane_to_global(lane, direction, x, y)
+                    north = lane_grid_north_bearing(lane, direction)
+                    pil = [lane_to_global(lane, direction, s.x_mm, s.y_mm)
+                           for s in so.seats() if s.index in occ]
+                    scan = cast_global(rx, ry, north, pil, n_points=360,
+                                       noise_mm=4.0, dropout=0.02, blind_width=0.0)
+                    p = so.DetectParams(blind_arc_width_deg=0.0)
+                    for r in so.detect_seat_occupancy(scan, x, y, params=p):
+                        checked += 1
+                        if r.seat.index in occ and r.state is so.Occupancy.EMPTY:
+                            false_empty += 1
+    print(f"PASS  test_coarse_sampling          {false_empty} false EMPTY on an occupied "
+          f"seat out of {checked} decisions at 1 deg sampling")
+    assert false_empty == 0
+
+
 def test_lidar_lever_arm():
     """With the sensor mounted well off the reference point, the answers must
     only stay right if the offset is declared. This is the check that the
@@ -357,6 +367,7 @@ if __name__ == "__main__":
     test_yaw_error_is_handled()
     test_accuracy_sweep()
     test_drive_through_resolves_every_seat_in_time()
+    test_coarse_sampling_never_reports_false_empty()
     test_lidar_lever_arm()
     test_pose_error_budget()
     print("\nAll checks passed.")

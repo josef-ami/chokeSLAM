@@ -58,12 +58,52 @@
   .tbtn:hover { border-color: var(--wallpt); }
   .tbtn.primary { background: rgba(90,169,255,.15); border-color: var(--wallpt); color: var(--wallpt); }
   #tstatus { font-size: 11px; color: var(--muted); margin-left: auto; }
+
+  /* --- view tabs ------------------------------------------------------- */
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .tab { background: #111826; color: var(--muted); border: 1px solid #2e3a55; border-radius: 7px;
+         padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; letter-spacing: .02em; }
+  .tab:hover { border-color: var(--wallpt); }
+  .tab.active { background: rgba(90,169,255,.15); border-color: var(--wallpt); color: var(--wallpt); }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* --- seat occupancy -------------------------------------------------- */
+  .seat-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .03em; }
+  .pill.occ { background: rgba(229,85,107,.18); color: var(--bad); }
+  .pill.emp { background: rgba(62,207,142,.15); color: var(--ok); }
+  .pill.unk { background: rgba(255,180,84,.15); color: var(--pillarpt); }
+  .pill.info { background: #1c2740; color: var(--muted); }
+  table.seats { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  table.seats th { text-align: right; color: var(--muted); font-weight: 600; font-size: 11px;
+                   padding: 4px 5px; border-bottom: 1px solid #2e3a55; white-space: nowrap; }
+  table.seats th:first-child, table.seats td:first-child { text-align: left; }
+  table.seats td { padding: 4px 5px; border-bottom: 1px solid #232c40; text-align: right; white-space: nowrap; }
+  table.seats tr.occ td:first-child { color: var(--bad); font-weight: 600; }
+  table.seats tr.emp td:first-child { color: var(--ok); }
+  table.seats tr.unk td:first-child { color: var(--pillarpt); }
+  table.seats tr.mismatch { background: rgba(229,85,107,.10); }
+  .seat-reason { font-size: 11px; color: var(--muted); padding: 2px 5px 7px; border-bottom: 1px solid #232c40; }
+  .warnbox { background: rgba(255,180,84,.08); border: 1px solid rgba(255,180,84,.35); border-radius: 8px;
+             padding: 9px 11px; margin-bottom: 10px; font-size: 11.5px; color: #e8c88f; }
+  .warnbox b { color: var(--pillarpt); display: block; margin-bottom: 4px; font-size: 11px; letter-spacing: .03em; }
+  .warnbox ul { margin: 4px 0 0; padding-left: 16px; }
+  .warnbox li { margin: 1px 0; }
 </style>
 </head>
 <body>
 <div id="layout">
-  <div id="matWrap"><canvas id="mat" width="760" height="760"></canvas></div>
+  <div id="matWrap">
+    <div class="tabs">
+      <button class="tab active" data-view="mat">MAT VIEW</button>
+      <button class="tab" data-view="lane">LANE VIEW &mdash; SEAT OCCUPANCY</button>
+    </div>
+    <div class="view active" data-view="mat"><canvas id="mat" width="760" height="760"></canvas></div>
+    <div class="view" data-view="lane"><canvas id="lane" width="760" height="760"></canvas></div>
+  </div>
   <div id="panel">
+    <div id="warnBox"></div>
     <h1>ESTIMATED POSE</h1>
     <div class="row"><span>mode</span><span id="mode">-</span></div>
     <div class="row"><span>section</span><span id="section">-</span></div>
@@ -72,6 +112,30 @@
     <div class="row"><span>lateral from outer (mm)</span><span id="lateral">-</span></div>
     <div class="row"><span>along section (mm)</span><span id="along">-</span></div>
 
+    <div id="seatBlock" style="display:none">
+      <h1 style="margin-top:18px">SEAT OCCUPANCY &mdash; CURRENT SECTION</h1>
+      <div class="seat-head" id="seatHead"></div>
+      <div class="row"><span>lane pose (x from left wall, y along travel)</span><span id="lanePose">-</span></div>
+      <div class="row"><span>yaw vs grid north</span><span id="laneYaw">-</span></div>
+      <div class="row"><span>grid north / outer wall</span><span id="laneNorth">-</span></div>
+      <table class="seats" id="seatTable"></table>
+      <div class="tcontrols" style="margin-top:10px">
+        <button class="tbtn" id="btnSeatReset">Forget held verdicts</button>
+        <span class="muted-note" style="padding:0">held verdicts are cleared automatically at every corner</span>
+      </div>
+      <div class="legend">
+        <div><span class="dot" style="background:var(--bad)"></span>occupied</div>
+        <div><span class="dot" style="background:var(--ok)"></span>empty (ray reached past the seat)</div>
+        <div><span class="dot" style="background:var(--pillarpt)"></span>unknown (occluded, blind wedge, or no return) &mdash; never treat as clear</div>
+      </div>
+      <div class="muted-note">
+        <b>state</b> is the held verdict your planner should use; <b>live</b> is this scan alone.
+        <b>exp</b> is the range the pillar&rsquo;s near face would be at; <b>obs</b> is what came back
+        in the search window around the predicted bearing.
+      </div>
+    </div>
+
+    <div id="matBlock">
     <h1 style="margin-top:18px">LAST BROADSIDE FIX</h1>
     <div class="row"><span>status</span><span id="fixStatus">-</span></div>
     <div class="row"><span>front (measured) / back (inferred)</span><span id="frontBack">-</span></div>
@@ -92,7 +156,10 @@
       <div><span class="dot" style="background:var(--wallpt)"></span>wall points</div>
       <div><span class="dot" style="background:var(--pillarpt)"></span>pillar points</div>
       <div><span class="dot" style="background:var(--unpt)"></span>unclassified</div>
+      <div><span style="display:inline-block;width:9px;height:9px;border:1px dashed #3a4666;margin-right:5px;vertical-align:middle"></span>mat_geometry slot table</div>
+      <div><span style="display:inline-block;width:9px;height:9px;border:1px solid #6f7fa8;margin-right:5px;vertical-align:middle"></span>rulebook Fig. 11 seats (what the detector uses) &mdash; the two disagree on all 24</div>
       <div><span class="dot" style="background:var(--candidate)"></span>start candidates: each leg has a colour; arrow + matching dots = its predicted LIDAR (solid=driving heading, dashed=+90&deg;)</div>
+    </div>
     </div>
 
     <details id="tuningWrap">
@@ -137,14 +204,31 @@ function drawField() {
   ctx.lineWidth = 2;
   ctx.strokeRect(ix, iy, islandSize, islandSize);
 
-  // 24 placeholder slots
+  // 24 placeholder slots, TWO tables drawn deliberately:
+  //  - faint dashed: mat_geometry.all_slots(), the repo's existing table
+  //  - solid: the rulebook Figure 11 positions the seat detector actually uses
+  // They disagree on all 24 (Finding 1). Drawing both keeps that visible
+  // instead of leaving the pillars looking mysteriously off their markers.
+  ctx.save();
   ctx.strokeStyle = '#3a4666';
   ctx.lineWidth = 1;
-  const slotPx = 16;
+  ctx.setLineDash([2, 2]);
+  const slotPx = 14;
   for (const s of field.slots) {
     const [sx, sy] = toCanvas(s.x_mm, s.y_mm);
     ctx.strokeRect(sx - slotPx / 2, sy - slotPx / 2, slotPx, slotPx);
   }
+  ctx.restore();
+
+  ctx.save();
+  ctx.strokeStyle = '#6f7fa8';
+  ctx.lineWidth = 1.2;
+  const seatPx = Math.max(5, 50 * scale);
+  for (const s of field.rulebook_slots_global || []) {
+    const [sx, sy] = toCanvas(s.x_mm, s.y_mm);
+    ctx.strokeRect(sx - seatPx / 2, sy - seatPx / 2, seatPx, seatPx);
+  }
+  ctx.restore();
 }
 
 function drawPillars(pillars) {
@@ -274,7 +358,370 @@ function renderCandidateTable(candidates) {
   box.innerHTML = html;
 }
 
+/* ===================================================================== */
+/* LANE VIEW -- the lane-local frame seat_occupancy.py works in.          */
+/* Drawn with grid north UP, because grid north IS the direction of       */
+/* travel: the robot always drives up the screen, whichever of the four   */
+/* lanes it is on. x runs left-to-right from the LEFT-hand wall.          */
+/* ===================================================================== */
+const laneCanvas = document.getElementById('lane');
+const lctx = laneCanvas.getContext('2d');
+const LANE_MARGIN = 30;
+let laneScale = 0.2, laneOx = 0, laneOy = 0;
+
+const SEAT_COLORS = { occupied: '#e5556b', empty: '#3ecf8e', unknown: '#ffb454' };
+
+function laneSetup() {
+  const L = field.lane;
+  // One scale for both axes -- this is a geometry debug view, so it is drawn
+  // to true scale and never stretched to fill the canvas.
+  laneScale = (laneCanvas.height - 2 * LANE_MARGIN) / L.length_mm;
+  laneOx = (laneCanvas.width - L.width_mm * laneScale) / 2;
+  laneOy = laneCanvas.height - LANE_MARGIN;
+}
+function toLaneCanvas(x_mm, y_mm) {
+  return [laneOx + x_mm * laneScale, laneOy - y_mm * laneScale];
+}
+
+function drawLaneField(sv) {
+  const L = field.lane;
+  lctx.clearRect(0, 0, laneCanvas.width, laneCanvas.height);
+  const [x0, yTop] = toLaneCanvas(0, L.length_mm);
+  const w = L.width_mm * laneScale, h = L.length_mm * laneScale;
+
+  // corner sections (no seats live here) then the straightforward section
+  lctx.fillStyle = '#141b2c';
+  lctx.fillRect(x0, yTop, w, h);
+  const [, ySecTop] = toLaneCanvas(0, L.section_y_max_mm);
+  const [, ySecBot] = toLaneCanvas(0, L.section_y_min_mm);
+  lctx.fillStyle = '#1c2740';
+  lctx.fillRect(x0, ySecTop, w, ySecBot - ySecTop);
+  lctx.strokeStyle = '#2e3a55';
+  lctx.setLineDash([4, 4]); lctx.lineWidth = 1;
+  for (const y of [L.section_y_min_mm, L.section_y_max_mm]) {
+    const [, py] = toLaneCanvas(0, y);
+    lctx.beginPath(); lctx.moveTo(x0, py); lctx.lineTo(x0 + w, py); lctx.stroke();
+  }
+  lctx.setLineDash([]);
+
+  // the two walls. Which one is the OUTER wall depends only on the driving
+  // direction -- CCW keeps it on the right.
+  const outerRight = sv && sv.outer_wall_side === 'right';
+  lctx.lineWidth = 3;
+  lctx.strokeStyle = '#4c5b7a';
+  lctx.beginPath(); lctx.moveTo(x0, yTop); lctx.lineTo(x0, yTop + h); lctx.stroke();
+  lctx.beginPath(); lctx.moveTo(x0 + w, yTop); lctx.lineTo(x0 + w, yTop + h); lctx.stroke();
+
+  // lane centreline -- the seats straddle it by 100mm either side
+  lctx.save();
+  lctx.strokeStyle = '#26314a'; lctx.lineWidth = 1; lctx.setLineDash([2, 6]);
+  const [xc] = toLaneCanvas(L.width_mm / 2, 0);
+  lctx.beginPath(); lctx.moveTo(xc, yTop); lctx.lineTo(xc, yTop + h); lctx.stroke();
+  lctx.restore();
+
+  lctx.save();
+  lctx.fillStyle = '#8993a8'; lctx.font = '10px sans-serif';
+  lctx.textAlign = 'right';
+  lctx.fillText(outerRight ? 'left wall (island)' : 'left wall (OUTER)', x0 - 8, yTop - 8);
+  lctx.textAlign = 'left';
+  lctx.fillText(outerRight ? 'right wall (OUTER)' : 'right wall (island)', x0 + w + 8, yTop - 8);
+  // the island only exists alongside the straightforward section
+  lctx.fillStyle = '#6b7590';
+  lctx.fillText('island only spans', x0 + w + 10, ySecTop + 12);
+  lctx.fillText('this band', x0 + w + 10, ySecTop + 23);
+  lctx.restore();
+
+  // grid north arrow
+  lctx.save();
+  lctx.strokeStyle = '#5aa9ff'; lctx.fillStyle = '#5aa9ff'; lctx.lineWidth = 2;
+  const ax = x0 - 22, ay0 = yTop + 70, ay1 = yTop + 26;
+  lctx.beginPath(); lctx.moveTo(ax, ay0); lctx.lineTo(ax, ay1); lctx.stroke();
+  lctx.beginPath(); lctx.moveTo(ax, ay1 - 5); lctx.lineTo(ax - 4, ay1 + 3); lctx.lineTo(ax + 4, ay1 + 3);
+  lctx.closePath(); lctx.fill();
+  lctx.font = '9px sans-serif'; lctx.textAlign = 'center';
+  lctx.fillText('grid N', ax, ay0 + 12);
+  lctx.fillText('(travel)', ax, ay0 + 22);
+  lctx.restore();
+
+  // y axis ticks every 500mm
+  lctx.save();
+  lctx.fillStyle = '#556077'; lctx.font = '9px sans-serif'; lctx.textAlign = 'right';
+  // topmost tick is skipped -- it sits where the wall labels go
+  for (let y = 0; y < L.length_mm; y += 500) {
+    const [, py] = toLaneCanvas(0, y);
+    lctx.fillText(String(y), x0 - 44, py + 3);
+  }
+  lctx.restore();
+}
+
+// Re-project the point cloud already streamed for the mat view, using the six
+// affine coefficients the server sends -- no second copy of the scan on the wire.
+function drawLanePoints(points, affine) {
+  if (!affine) return;
+  const [a11, a12, c1, a21, a22, c2] = affine;
+  for (const p of points) {
+    const lx = a11 * p.x + a12 * p.y + c1;
+    const ly = a21 * p.x + a22 * p.y + c2;
+    const [px, py] = toLaneCanvas(lx, ly);
+    if (px < -20 || px > laneCanvas.width + 20 || py < -20 || py > laneCanvas.height + 20) continue;
+    lctx.fillStyle = p.kind === 'wall' ? '#33507d' : (p.kind === 'pillar' ? '#ffb454' : '#3a4457');
+    lctx.beginPath();
+    lctx.arc(px, py, p.kind === 'wall' ? 1.4 : 2.4, 0, Math.PI * 2);
+    lctx.fill();
+  }
+}
+
+// The search window: the wedge the detector actually looked in, drawn from the
+// SENSOR (not the pose reference point) out to just past the seat. When a
+// verdict looks wrong on the bench, this is the thing to read -- if the wedge
+// misses the pillar the bearing is wrong (pose/yaw); if it covers it but the
+// range disagrees, it is a calibration or lever-arm problem.
+function drawSeatRay(sv, seat) {
+  const col = SEAT_COLORS[seat.state] || '#556077';
+  const [sx, sy] = toLaneCanvas(sv.sensor.x_mm, sv.sensor.y_mm);
+  // lane bearing -> screen angle (bearing is clockwise from +y, canvas y is flipped)
+  const br = seat.bearing_deg * Math.PI / 180;
+  const hw = (seat.half_width_deg || 0) * Math.PI / 180;
+  const r = (seat.expected_centre_mm + 90) * laneScale;
+  const dir = (a) => [Math.sin(a), -Math.cos(a)];
+
+  lctx.save();
+  lctx.globalAlpha = 0.16;
+  lctx.fillStyle = col;
+  lctx.beginPath();
+  lctx.moveTo(sx, sy);
+  for (let a = br - hw; a <= br + hw + 1e-9; a += Math.max(hw / 6, 0.004)) {
+    const [dx, dy] = dir(a);
+    lctx.lineTo(sx + r * dx, sy + r * dy);
+  }
+  lctx.closePath(); lctx.fill();
+  lctx.restore();
+
+  lctx.save();
+  lctx.strokeStyle = col;
+  lctx.globalAlpha = seat.state === 'unknown' ? 0.45 : 0.8;
+  lctx.lineWidth = 1;
+  if (seat.state === 'unknown') lctx.setLineDash([3, 3]);
+  const [dx, dy] = dir(br);
+  lctx.beginPath(); lctx.moveTo(sx, sy);
+  lctx.lineTo(sx + seat.expected_centre_mm * laneScale * dx,
+              sy + seat.expected_centre_mm * laneScale * dy);
+  lctx.stroke();
+  lctx.restore();
+
+  // where the ray actually stopped
+  if (seat.observed_mm != null) {
+    const ox = sx + seat.observed_mm * laneScale * dx;
+    const oy = sy + seat.observed_mm * laneScale * dy;
+    lctx.save();
+    lctx.strokeStyle = col; lctx.globalAlpha = 0.9; lctx.lineWidth = 1.5;
+    lctx.beginPath(); lctx.moveTo(ox - 3, oy - 3); lctx.lineTo(ox + 3, oy + 3);
+    lctx.moveTo(ox + 3, oy - 3); lctx.lineTo(ox - 3, oy + 3);
+    lctx.stroke(); lctx.restore();
+  }
+}
+
+function drawSeat(sv, seat) {
+  const L = field.lane;
+  const col = SEAT_COLORS[seat.state] || '#556077';
+  const [cx, cy] = toLaneCanvas(seat.x_mm, seat.y_mm);
+  const half = (L.seat_size_mm / 2) * laneScale;
+  const rad = (L.seat_circle_dia_mm / 2) * laneScale;
+
+  // the 85mm "was it moved" circle from rule 13.15
+  lctx.save();
+  lctx.strokeStyle = '#3a4666'; lctx.lineWidth = 1; lctx.globalAlpha = 0.9;
+  lctx.beginPath(); lctx.arc(cx, cy, rad, 0, Math.PI * 2); lctx.stroke();
+  lctx.restore();
+
+  lctx.save();
+  if (seat.state === 'occupied') {
+    lctx.fillStyle = col; lctx.fillRect(cx - half, cy - half, half * 2, half * 2);
+  } else if (seat.state === 'empty') {
+    lctx.strokeStyle = col; lctx.lineWidth = 1.5;
+    lctx.strokeRect(cx - half, cy - half, half * 2, half * 2);
+  } else {
+    lctx.strokeStyle = col; lctx.lineWidth = 1.5; lctx.setLineDash([2, 2]);
+    lctx.strokeRect(cx - half, cy - half, half * 2, half * 2);
+  }
+  lctx.restore();
+
+  // Ground truth ring (mock only). Only a DECIDED verdict can contradict the
+  // truth -- an UNKNOWN seat is undecided, not wrong, so it is left unmarked.
+  if (seat.truth !== null && seat.truth !== undefined && seat.state !== 'unknown') {
+    const agrees = (seat.state === 'occupied') === !!seat.truth;
+    if (!agrees) {
+      lctx.save();
+      lctx.strokeStyle = '#ffffff'; lctx.lineWidth = 1.5; lctx.setLineDash([2, 2]);
+      lctx.beginPath(); lctx.arc(cx, cy, rad + 5, 0, Math.PI * 2); lctx.stroke();
+      lctx.restore();
+    }
+  }
+
+  lctx.save();
+  lctx.fillStyle = col; lctx.font = 'bold 10px sans-serif';
+  const onLeft = seat.x_mm < L.width_mm / 2;
+  lctx.textAlign = onLeft ? 'right' : 'left';
+  lctx.fillText(`${seat.index} ${seat.name}`, cx + (onLeft ? -rad - 6 : rad + 6), cy - 2);
+  lctx.fillStyle = '#8993a8'; lctx.font = '9px sans-serif';
+  const obs = seat.observed_mm == null ? 'no return' : `${seat.observed_mm.toFixed(0)}`;
+  lctx.fillText(`exp ${seat.expected_face_mm.toFixed(0)} / obs ${obs}`,
+                cx + (onLeft ? -rad - 6 : rad + 6), cy + 9);
+  lctx.restore();
+}
+
+function drawLaneRobot(sv) {
+  const [px, py] = toLaneCanvas(sv.pose.x_mm, sv.pose.y_mm);
+  const a = sv.pose.yaw_deg * Math.PI / 180;
+  const dx = Math.sin(a), dy = -Math.cos(a);
+
+  // the rear blind wedge, if one is modelled -- seats inside it can only ever
+  // come back UNKNOWN, so it belongs on screen next to them
+  const bw = sv.blind_arc ? sv.blind_arc.width_deg : 0;
+  if (bw > 0) {
+    const [sx, sy] = toLaneCanvas(sv.sensor.x_mm, sv.sensor.y_mm);
+    const centre = a + (sv.blind_arc.center_deg * Math.PI / 180);
+    const half = bw * Math.PI / 360;
+    lctx.save();
+    lctx.fillStyle = '#000000'; lctx.globalAlpha = 0.35;
+    lctx.beginPath(); lctx.moveTo(sx, sy);
+    for (let t = centre - half; t <= centre + half + 1e-9; t += 0.03) {
+      lctx.lineTo(sx + 2200 * laneScale * Math.sin(t), sy - 2200 * laneScale * Math.cos(t));
+    }
+    lctx.closePath(); lctx.fill();
+    lctx.restore();
+  }
+
+  lctx.save();
+  lctx.strokeStyle = '#5aa9ff'; lctx.fillStyle = '#5aa9ff'; lctx.lineWidth = 2;
+  lctx.beginPath(); lctx.arc(px, py, 8, 0, Math.PI * 2); lctx.fill();
+  lctx.beginPath(); lctx.moveTo(px, py); lctx.lineTo(px + 26 * dx, py + 26 * dy); lctx.stroke();
+  lctx.restore();
+
+  // Grid north IS the direction of travel, so the arrow should point up the
+  // screen. If it does not, the heading feeding this view disagrees with the
+  // direction the robot is moving -- say so on the canvas, because otherwise
+  // it reads as a fault in the drawing rather than in the heading.
+  if (Math.abs(sv.pose.yaw_deg) > 90) {
+    lctx.save();
+    lctx.fillStyle = '#ffb454'; lctx.font = 'bold 10px sans-serif'; lctx.textAlign = 'left';
+    lctx.fillText('heading is ' + Math.abs(sv.pose.yaw_deg).toFixed(0) + '° from travel', px + 14, py + 4);
+    lctx.fillStyle = '#8993a8'; lctx.font = '9px sans-serif';
+    lctx.fillText('(see the convention warning)', px + 14, py + 15);
+    lctx.restore();
+  }
+
+  // sensor origin, when the lever arm puts it somewhere else
+  const [sx, sy] = toLaneCanvas(sv.sensor.x_mm, sv.sensor.y_mm);
+  if (Math.hypot(sx - px, sy - py) > 1.5) {
+    lctx.save();
+    lctx.strokeStyle = '#e7ecf5'; lctx.lineWidth = 1;
+    lctx.beginPath(); lctx.moveTo(sx - 4, sy); lctx.lineTo(sx + 4, sy);
+    lctx.moveTo(sx, sy - 4); lctx.lineTo(sx, sy + 4); lctx.stroke();
+    lctx.restore();
+  }
+}
+
+function drawLaneView(state) {
+  const sv = state.seat_view;
+  if (!field || !field.lane) return;
+  laneSetup();
+  drawLaneField(sv);
+  if (!sv) {
+    lctx.fillStyle = '#8993a8'; lctx.font = '12px sans-serif'; lctx.textAlign = 'center';
+    lctx.fillText('no seat data in this frame', laneCanvas.width / 2, laneCanvas.height / 2);
+    return;
+  }
+  drawLanePoints(state.points || [], sv.affine);
+  for (const s of sv.seats) drawSeatRay(sv, s);
+  for (const s of sv.seats) drawSeat(sv, s);
+  drawLaneRobot(sv);
+}
+
+function renderSeatPanel(sv) {
+  if (!sv) return;
+  const c = sv.counts;
+  document.getElementById('seatHead').innerHTML =
+      `<span class="pill occ">${c.occupied} occupied</span>`
+    + `<span class="pill emp">${c.empty} empty</span>`
+    + `<span class="pill unk">${c.unknown} unknown</span>`
+    + `<span class="pill info">section ${sv.section} &middot; ${sv.direction}</span>`
+    + `<span class="pill info">pose: ${sv.pose_source}</span>`
+    + (sv.sticky ? '<span class="pill info">held</span>' : '');
+
+  setText('lanePose', `${sv.pose.x_mm.toFixed(0)}, ${sv.pose.y_mm.toFixed(0)}`);
+  setText('laneYaw', `${sv.pose.yaw_deg.toFixed(1)}°`
+    + (sv.yaw_offset_deg ? ` (incl. ${sv.yaw_offset_deg}° offset)` : ''));
+  setText('laneNorth', `${sv.grid_north_deg.toFixed(0)}° · outer wall on the ${sv.outer_wall_side}`);
+
+  let html = '<tr><th>seat</th><th>state</th><th>live</th><th>brg</th>'
+           + '<th>exp</th><th>obs</th><th>Δ</th><th>n</th><th title="returns a pillar here would give at this scan\'s resolution">hits</th><th>truth</th></tr>';
+  for (const s of sv.seats) {
+    const cls = s.state === 'occupied' ? 'occ' : (s.state === 'empty' ? 'emp' : 'unk');
+    const hasTruth = (s.truth !== null && s.truth !== undefined);
+    // UNKNOWN is undecided, not wrong -- only a decided verdict can mismatch.
+    const agrees = (!hasTruth || s.state === 'unknown')
+      ? true : ((s.state === 'occupied') === !!s.truth);
+    const num = (v, d) => (v === null || v === undefined) ? '—' : v.toFixed(d === undefined ? 0 : d);
+    html += `<tr class="${cls} ${agrees ? '' : 'mismatch'}">`
+      + `<td>${s.index} ${s.name}</td>`
+      + `<td>${s.state}</td>`
+      + `<td style="color:#8993a8">${s.live_state}</td>`
+      + `<td>${num(s.bearing_deg, 1)}°</td>`
+      + `<td>${num(s.expected_face_mm)}</td>`
+      + `<td>${num(s.observed_mm)}</td>`
+      + `<td>${num(s.residual_mm)}</td>`
+      + `<td>${s.n_points}</td>`
+      + `<td>${num(s.expected_hits, 1)}</td>`
+      + `<td>${hasTruth ? (s.truth ? 'pillar' : 'clear') : '—'}</td>`
+      + `</tr>`;
+    html += `<tr><td colspan="10" class="seat-reason">${s.reason || ''}</td></tr>`;
+  }
+  document.getElementById('seatTable').innerHTML = html;
+}
+
+let activeView = 'mat';
+function setView(name) {
+  activeView = name;
+  document.querySelectorAll('.tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.view === name));
+  document.querySelectorAll('.view').forEach(v =>
+    v.classList.toggle('active', v.dataset.view === name));
+  document.getElementById('seatBlock').style.display = (name === 'lane') ? 'block' : 'none';
+  document.getElementById('matBlock').style.display = (name === 'lane') ? 'none' : 'block';
+  if (lastState) render(lastState);
+}
+
+function renderWarnings(warnings) {
+  const box = document.getElementById('warnBox');
+  if (!warnings || !warnings.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="warnbox"><b>TWO CONVENTIONS IN THIS CODEBASE</b>'
+    + 'The lane view uses the geometry of the mat. localization.py disagrees with it '
+    + 'in the places below, so a pose it produces may be mirrored or reversed — the '
+    + 'lane view will faithfully draw whatever it is given.'
+    + '<ul>' + warnings.map(w => `<li>${w}</li>`).join('') + '</ul></div>';
+}
+
+let lastState = null;
+
+// Shared by both views -- the estimated pose block stays visible in each.
+function updateReadouts(state) {
+  setText('mode', state.mode);
+  setText('section', state.estimated.section);
+  setText('xy', `${state.estimated.x_mm.toFixed(0)}, ${state.estimated.y_mm.toFixed(0)}`);
+  setText('heading', state.estimated.heading_deg.toFixed(1));
+  setText('lateral', state.estimated.lateral_mm.toFixed(0));
+  setText('along', state.estimated.along_mm.toFixed(0));
+}
+
 function render(state) {
+  lastState = state;
+  if (activeView === 'lane') {
+    drawLaneView(state);
+    renderSeatPanel(state.seat_view);
+    updateReadouts(state);
+    return;
+  }
   drawField();
   drawPillars(state.pillars);
   drawPoints(state.points);
@@ -282,12 +729,7 @@ function render(state) {
   if (state.true) drawRobot(state.true, '#8993a8', false);
   drawRobot(state.estimated, '#5aa9ff', true);
 
-  setText('mode', state.mode);
-  setText('section', state.estimated.section);
-  setText('xy', `${state.estimated.x_mm.toFixed(0)}, ${state.estimated.y_mm.toFixed(0)}`);
-  setText('heading', state.estimated.heading_deg.toFixed(1));
-  setText('lateral', state.estimated.lateral_mm.toFixed(0));
-  setText('along', state.estimated.along_mm.toFixed(0));
+  updateReadouts(state);
 
   const fix = state.last_fix;
   const badge = document.getElementById('fixStatus');
@@ -405,12 +847,23 @@ async function refreshTuning() {
 
 async function loadField() {
   field = await (await fetch('/api/field')).json();
+  renderWarnings(field.convention_warnings);
   drawField();
+  if (field.lane) laneSetup();
+}
+
+async function onSeatReset() {
+  const res = await postJSON('/api/seats/reset', {});
+  tstatus(res.ok ? 'held seat verdicts cleared' : 'seat reset failed', !res.ok);
 }
 
 async function init() {
   await loadField();
   await refreshTuning();
+
+  document.querySelectorAll('.tab').forEach(t =>
+    t.addEventListener('click', () => setView(t.dataset.view)));
+  document.getElementById('btnSeatReset').addEventListener('click', onSeatReset);
 
   const es = new EventSource('/stream');
   es.onmessage = (ev) => {

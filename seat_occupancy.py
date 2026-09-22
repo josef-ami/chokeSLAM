@@ -193,6 +193,17 @@ class DetectParams:
     lidar_offset_forward_mm: float = 0.0
     lidar_offset_lateral_mm: float = 0.0
 
+    # Before declaring a seat EMPTY, require that a pillar standing on it would
+    # have produced at least this many returns, given the scan's own measured
+    # angular resolution. A 50 mm pillar at 1.7 m subtends 1.7 deg; at 1 deg
+    # sampling that is one or two returns, and a single dropout then hides it
+    # completely -- the window fills with the wall behind and the seat looks
+    # empty. Below this standard the detector cannot tell "nothing there" from
+    # "the one return that would have proved it was lost", so it says UNKNOWN.
+    # It matters more than it looks: EMPTY is the verdict a caller holds onto,
+    # so a false EMPTY is sticky in a way a false UNKNOWN is not.
+    min_expected_hits: float = 2.0
+
     # A seat closer to the sensor than this cannot be observed at all -- the
     # pillar's face falls inside the LIDAR's dead zone, so the only returns in
     # the window come from whatever is behind it. Without this gate a seat
@@ -227,6 +238,7 @@ class SeatReading:
 
     observed_range_mm: float | None = None    # nearest plausible surface found
     observed_width_deg: float | None = None
+    expected_hits: float | None = None        # returns a pillar here would give
     residual_mm: float | None = None          # observed - expected_face
     n_points_in_window: int = 0
 
@@ -309,6 +321,18 @@ def _normalise_scan(scan: Iterable, p: DetectParams) -> list[tuple[float, float]
         out.append((a % 360.0, r))
     out.sort()
     return out
+
+
+def _angular_step_deg(pts: Sequence[tuple[float, float]]) -> float:
+    """The scan's own angular resolution, measured rather than assumed: the
+    median gap between consecutive returns. Taken from the data so the same
+    thresholds work on a 360-point sweep, a 720-point sweep, or a real unit
+    whose rate drifts with rotation speed."""
+    if len(pts) < 8:
+        return 1.0
+    gaps = sorted((pts[i + 1][0] - pts[i][0]) % 360.0 for i in range(len(pts) - 1))
+    step = gaps[len(gaps) // 2]
+    return step if step > 1e-3 else 1.0
 
 
 def _points_in_window(pts: Sequence[tuple[float, float]], centre_deg: float,
@@ -394,6 +418,7 @@ def detect_seat_occupancy(scan: Iterable,
     """
     p = params or DetectParams()
     pts = _normalise_scan(scan, p)
+    step_deg = _angular_step_deg(pts)
     out: list[SeatReading] = []
 
     # Ranges are measured from the SENSOR, not from the pose reference point.
@@ -441,6 +466,14 @@ def detect_seat_occupancy(scan: Iterable,
             expected_centre_mm=expected_centre,
             expected_face_mm=expected_face,
             range_tolerance_mm=tol,
+            # Deliberately computed from the pillar's FLAT face (25 mm
+            # half-width), not the diagonal the search window uses. The window
+            # asks "where might it be?" and should be generous; this asks
+            # "would I have seen it at all?" and must be the worst case, since
+            # a face-on pillar is the narrowest target it can present.
+            expected_hits=round(
+                2.0 * math.degrees(math.atan2(PILLAR_HALF_MM,
+                                              max(expected_centre, 1.0))) / step_deg, 2),
         )
 
         # --- reachability gates, before looking at any data ---------------
@@ -483,7 +516,7 @@ def detect_seat_occupancy(scan: Iterable,
             out.append(rd)
             continue
 
-        # --- nothing at the seat: was the seat actually observed? ---------
+        # --- nothing certifiable at the seat: was it actually observed? ---
         if nearest < expected_face - tol:
             rd.residual_mm = nearest - expected_face
             rd.reason = (f"line of sight blocked at {nearest:.0f} mm, "
@@ -491,8 +524,38 @@ def detect_seat_occupancy(scan: Iterable,
             out.append(rd)          # stays UNKNOWN
             continue
 
-        # Everything in the window is further away than the seat -- the ray
-        # flew over an empty seat and hit whatever is behind it.
+        if nearest <= expected_face + tol:
+            # Something IS sitting at the seat's range, it just could not be
+            # certified as a pillar -- too few points to form a run, or a run
+            # too wide to be 50 mm. That is ambiguous, NOT absence.
+            #
+            # This is the common case for a far seat at coarse angular
+            # resolution: a 50 mm pillar at 1.7 m subtends 1.7 deg, so a 1 deg
+            # sweep yields one or two returns and a dropout can leave one.
+            # Reporting EMPTY there would be a confident wrong answer about a
+            # seat that has a pillar on it, so it reports UNKNOWN and waits
+            # for a closer look. (Caught by comparing against the mock's
+            # ground truth on the dashboard's lane view, at 1 deg sampling.)
+            rd.residual_mm = nearest - expected_face
+            rd.reason = (f"return at {nearest:.0f} mm is within {tol:.0f} mm of the "
+                         f"seat but didn't form a pillar-shaped run "
+                         f"({rd.n_points_in_window} pts in the window) -- ambiguous, "
+                         f"not empty")
+            out.append(rd)          # stays UNKNOWN
+            continue
+
+        # Everything in the window is CLEARLY further away than the seat. The
+        # ray flew over an empty seat and hit whatever is behind it -- but only
+        # call that EMPTY if a pillar standing here would have been resolvable
+        # in the first place (see min_expected_hits).
+        if rd.expected_hits < p.min_expected_hits:
+            rd.residual_mm = nearest - expected_face
+            rd.reason = (f"nothing at the seat, but a pillar here would only give "
+                         f"{rd.expected_hits:.1f} returns at this scan's {step_deg:.2f} deg "
+                         f"resolution -- too few to call it empty")
+            out.append(rd)          # stays UNKNOWN
+            continue
+
         rd.state = Occupancy.EMPTY
         rd.residual_mm = nearest - expected_face
         rd.reason = (f"nearest return {nearest:.0f} mm is "
