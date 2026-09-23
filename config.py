@@ -133,7 +133,7 @@ DESKEW_HISTORY_S = 0.5
 # LIDAR is later). The de-skew takes a return as measured at
 # (its sweep time - this). MEASURE IT on the robot: python3 measure_lidar_delay.py --real
 # (docs/CHANGES.md section 11). 0 until measured.
-LIDAR_TIME_OFFSET_S = 0.0
+LIDAR_TIME_OFFSET_S = -0.05
 
 # --- Dashboard / server ---------------------------------------------------
 DASHBOARD_HOST = "0.0.0.0"
