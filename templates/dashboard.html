@@ -8,7 +8,7 @@
   :root {
     --bg: #0e131d; --panel: #151c29; --panel2: #1b2433; --ink: #e6ebf4; --muted: #8b95a8; --line: #2a3446;
     --wall: #c9d2e3; --lane: #1a2536; --lane-cur: #1f2d44;
-    --present: #f0a33a; --absent: #3fbf7f; --unknown: #7d879a;
+    --present: #f0a33a; --absent: #3fbf7f; --unknown: #7d879a; --pillar-red: #e5484d; --pillar-green: #22c55e;
     --path: #43c6db; --live: #f4f06a; --init: #b48cff; --truth: #ff6b8a; --robot: #ffffff;
     --bad: #ff6b6b; --ok: #3fbf7f; --warn: #f0a33a;
   }
@@ -75,7 +75,9 @@
       <div id="tip"></div>
     </div>
     <div id="legend">
-      <span><span class="sw" style="background:var(--present)"></span> present</span>
+      <span><span class="sw" style="background:var(--present)"></span> present (colour pending / unknown)</span>
+      <span><span class="sw" style="background:var(--pillar-red)"></span> red pillar</span>
+      <span><span class="sw" style="background:var(--pillar-green)"></span> green pillar</span>
       <span><span class="sw" style="border:2px solid var(--absent)"></span> absent</span>
       <span><span class="sw" style="border:2px dashed var(--unknown)"></span> unknown</span>
       <span>■ from initialisation · ◆ from the entry re-check</span>
@@ -111,6 +113,7 @@
     <div class="card"><h2>Initialisation</h2><div id="init" class="muted">not initialised</div></div>
     <div class="card"><h2>STM32 (IMU + encoder)</h2><div id="imu" class="kv"></div></div>
     <div class="card"><h2>LIDAR</h2><div id="lidar" class="kv"></div></div>
+    <div class="card"><h2>Camera (pillar colour)</h2><div id="camera" class="kv"></div></div>
     <div class="card"><h2>Events</h2><div id="events"></div></div>
     <div class="card">
       <h2>Tuning <button id="resetBtn" class="secondary">Reset to config.py</button></h2>
@@ -193,14 +196,20 @@ function draw() {
       ctx.save(); ctx.translate(a, b);
       if (seat.source === 'entry') ctx.rotate(Math.PI / 4);
       ctx.lineWidth = 2;
-      if (seat.state === 'occupied') { ctx.fillStyle = css('--present'); ctx.fillRect(-s, -s, 2 * s, 2 * s); }
+      if (seat.state === 'occupied') {
+        ctx.fillStyle = css(seat.color === 'red' ? '--pillar-red' : seat.color === 'green' ? '--pillar-green' : '--present');
+        ctx.fillRect(-s, -s, 2 * s, 2 * s);
+      }
       else if (seat.state === 'empty') { ctx.strokeStyle = css('--absent'); ctx.strokeRect(-s, -s, 2 * s, 2 * s); }
       else { ctx.strokeStyle = css('--unknown'); ctx.setLineDash([3, 3]); ctx.strokeRect(-s, -s, 2 * s, 2 * s); ctx.setLineDash([]); }
       ctx.restore();
-      if (truth && seat.state !== 'unknown' && (seat.state === 'occupied') !== truth.has(seat.index)) {
+      const wrong = truth && seat.state !== 'unknown' && (seat.state === 'occupied') !== truth.has(seat.index);
+      const tc = S.truth ? (S.truth.colors_by_slot[lane.slot] || {})[seat.index] : undefined;
+      const wrongColor = !!tc && (seat.color === 'red' || seat.color === 'green') && seat.color !== tc;
+      if (wrong || wrongColor) {
         ctx.strokeStyle = css('--bad'); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(a, b, s + 6, 0, 2 * Math.PI); ctx.stroke();
       }
-      seatHits.push({ a, b, lane, seat, wrong: truth && seat.state !== 'unknown' && (seat.state === 'occupied') !== truth.has(seat.index) });
+      seatHits.push({ a, b, lane, seat, wrong, wrongColor, trueColor: tc });
     }
   }
   // robots
@@ -228,7 +237,9 @@ cv.addEventListener('mousemove', e => {
     `<span class="st-${s.state}">${s.state === 'occupied' ? 'PRESENT' : s.state === 'empty' ? 'absent' : 'unknown'}</span>` +
     ` · from ${s.source === 'init' ? 'initialisation' : s.source === 'entry' ? 'the entry re-check' : '–'}` +
     (s.at_y !== null ? ` at y ${s.at_y}` : '') + `<br><span class="muted">${esc(s.reason)}</span>` +
-    (best.wrong ? '<br><span class="bad">disagrees with the simulated truth</span>' : '');
+    (s.color ? `<br>colour: ${colorLabel(s.color)} <span class="muted">${esc(s.color_reason)}</span>` : '') +
+    (best.wrong ? '<br><span class="bad">disagrees with the simulated truth</span>' : '') +
+    (best.wrongColor ? `<br><span class="bad">colour disagrees with the simulated truth (${esc(best.trueColor)})</span>` : '');
   tip.style.display = 'block';
   tip.style.left = (e.clientX - r.left + 16) + 'px'; tip.style.top = (e.clientY - r.top + 16) + 'px';
 });
@@ -237,6 +248,9 @@ for (const id of ['showLive', 'showInit', 'showPath', 'showTruth']) $(id).addEve
 
 // ---- panel ------------------------------------------------------------------
 const kv = (el, rows) => { el.innerHTML = rows.map(([k, v]) => `<div>${esc(k)}</div><div>${v}</div>`).join(''); };
+const colorLabel = c => c === 'red' ? '<span style="color:var(--pillar-red);font-weight:600">RED</span>' :
+  c === 'green' ? '<span style="color:var(--pillar-green);font-weight:600">GREEN</span>' :
+  c === 'pending' ? '<span class="muted">pending</span>' : c === 'unknown' ? '<span class="st-unknown">unknown</span>' : '';
 const stateLabel = st => `<span class="st-${st}">${st === 'occupied' ? 'PRESENT' : st === 'empty' ? 'absent' : 'unknown'}</span>`;
 
 function renderPanel() {
@@ -260,7 +274,10 @@ function renderPanel() {
     const truth = S.truth ? new Set(S.truth.seats_by_slot[l.slot] || []) : null;
     const chips = l.seats.map(s => {
       const wrong = truth && s.state !== 'unknown' && (s.state === 'occupied') !== truth.has(s.index);
-      return `<span class="chip" title="${esc(s.name + ': ' + s.reason)}">[${s.index}] ${stateLabel(s.state)}${wrong ? ' <span class="bad">✗</span>' : ''}</span>`;
+      const tc = S.truth ? (S.truth.colors_by_slot[l.slot] || {})[s.index] : undefined;
+      const wrongColor = !!tc && (s.color === 'red' || s.color === 'green') && s.color !== tc;
+      const title = s.name + ': ' + s.reason + (s.color ? ' | colour: ' + s.color + ' -- ' + s.color_reason : '');
+      return `<span class="chip" title="${esc(title)}">[${s.index}] ${stateLabel(s.state)}${s.color ? ' ' + colorLabel(s.color) : ''}${(wrong || wrongColor) ? ' <span class="bad">✗</span>' : ''}</span>`;
     }).join('');
     const src = l.source === 'init' ? 'initialisation' :
       `entry re-check: ${l.frames_used} frames used, ${l.frames_skipped_align} skipped (±20° gate); de-skew moved returns up to ${fmt(l.max_shift_mm, ' mm')}, dropped ${l.returns_dropped_old} stale${l.frames_skipped_old ? `, ${l.frames_skipped_old} frames from before the lane skipped` : ''}${l.frozen ? '' : ' <span class="warn">(still running)</span>'}`;
@@ -291,6 +308,15 @@ function renderPanel() {
     ['heading / distance', m.heading_deg !== undefined ? `${m.heading_deg}° / ${(m.distance_mm / 1000).toFixed(2)} m` : '–'],
     ...((m.recent_log || []).length ? [['firmware log', `<span class="muted small">${m.recent_log.slice(-5).map(esc).join('<br>')}</span>`]] : []),
     ...(m.last_bad_reason ? [['last bad line', `<span class="muted small">${esc(m.last_bad_reason)}</span>`]] : []),
+  ]);
+  const C = S.camera || {};
+  kv($('camera'), [
+    ['source', C.error ? `<span class="bad">${esc(C.error)}</span>` : esc(C.source) + (C.thread_alive === false ? ' <span class="bad">stopped</span>' : '')],
+    ['frames / rate', `${fmt(C.frames)} / ${fmt(C.fps, ' fps')}`],
+    ['used for colour / skipped (no pose)', `${fmt(C.frames_used)} / ${fmt(C.frames_no_pose)}`],
+    ['seats waiting for colour', fmt(C.pending)],
+    ['last frame processed in', fmt(C.process_ms, ' ms')],
+    ...(C.stamp_fallbacks ? [['timestamps not on the Pi clock', `<span class="warn">${fmt(C.stamp_fallbacks)}</span>`]] : []),
   ]);
   const L = S.lidar || {};
   kv($('lidar'), [

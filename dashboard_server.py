@@ -67,7 +67,9 @@ class Runtime:
         self.lock = threading.RLock()
         self.seat_params = so.DetectParams()
         self.mock = {"direction": "CCW", "start_slot": 0, "seed": 1, "speed_mm_s": 600.0, "time_scale": 1.0}
-        self.sim = self.link = self.lidar = None
+        self.sim = self.link = self.lidar = self.camera = None
+        self._last_cam_no = None
+        self.camera_ms = None                 # time the last colour-ID frame took to process
         self.trk: LaneTracker | None = None
         self.init: li.InitResult | None = None
         self.init_raw = None
@@ -93,7 +95,7 @@ class Runtime:
             m = self.mock
             self.sim = LiveSim(m["direction"], int(m["start_slot"]), int(m["seed"]), float(m["speed_mm_s"]),
                                time_scale=float(m["time_scale"]))
-            self.link, self.lidar = self.sim.link, self.sim.lidar
+            self.link, self.lidar, self.camera = self.sim.link, self.sim.lidar, self.sim.camera
         else:
             from lidar_source import RPLidarC1Source
             from stm32_link import Stm32Link
@@ -101,6 +103,10 @@ class Runtime:
             self.link.start()
             self.lidar = RPLidarC1Source(config.LIDAR_PORT, config.LIDAR_BAUDRATE, config.LIDAR_SCAN_TIMEOUT_S)
             self.lidar.start()
+            if config.CAMERA_ENABLED:
+                from camera_source import Picamera2Source
+                self.camera = Picamera2Source()
+                self.camera.start()
 
     # -- initialise ---------------------------------------------------------------
     def initialise(self) -> dict:
@@ -165,6 +171,20 @@ class Runtime:
                 self.trk.on_imu(s)
             self.samples.extend(batch)
 
+    def _feed_camera(self):
+        """Pillar colour ID (checkpoint D): a NEW frame goes to the tracker only
+        while a PRESENT seat is waiting for its colour; the frame's own capture
+        time picks the pose (#62). After _feed_imu, so the history reaches it."""
+        if self.trk is None or self.camera is None or not self.trk.wants_camera:
+            return
+        fr = self.camera.get_latest_frame()
+        if fr is None or fr[2] == self._last_cam_no:
+            return
+        self._last_cam_no = fr[2]
+        t0 = time.perf_counter()
+        self.trk.on_camera_frame(fr[0], fr[1])
+        self.camera_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+
     def _loop(self):
         while True:
             try:
@@ -184,6 +204,7 @@ class Runtime:
                 # de-skew uses already reaches the frame's newest returns (no extrapolation over the gap)
                 raw4 = self.lidar.get_latest_scan_timed()
             self._feed_imu()
+            self._feed_camera()
             if not raw4:
                 return
             pts, times = clean_and_project_timed(raw4, config.LIDAR_ANGLE_SIGN, config.LIDAR_ANGLE_ZERO_OFFSET_DEG)
@@ -214,7 +235,7 @@ class Runtime:
             out = {"mode": self.mode, "message": self.message, "error": self.error, "init_id": self.init_id,
                    "tracking": trk is not None, "live": self.live, "live_frame": self.live_frame,
                    "mock": dict(self.mock) if self.mode == "mock" else None,
-                   "imu": self._imu_status(), "lidar": self._lidar_status(),
+                   "imu": self._imu_status(), "lidar": self._lidar_status(), "camera": self._camera_status(),
                    "init": self._init_summary()}
             if trk is not None:
                 X, Y = dp.lane_to_display(trk.slot, trk.x, trk.y, trk.direction)
@@ -238,11 +259,12 @@ class Runtime:
                 g2d = dp.GlobalToDisplay(t["start_section"], t["direction"])
                 gx, gy, brg = t["pose"]
                 X, Y = g2d.point(gx, gy)
-                truth_lanes = {}
+                truth_lanes, truth_colors = {}, {}
                 for k, sec in enumerate(t["slot_sections"]):
                     truth_lanes[k] = t["seats"].get(sec, [])
+                    truth_colors[k] = t["colors"].get(sec, {})
                 out["truth"] = {"robot": {"X": _r(X), "Y": _r(Y), "bearing": _r(g2d.bearing(brg), 2)},
-                                "seats_by_slot": truth_lanes, "driving": t["driving"], "finished": t["finished"],
+                                "seats_by_slot": truth_lanes, "colors_by_slot": truth_colors, "driving": t["driving"], "finished": t["finished"],
                                 "start_section": t["start_section"]}
             return out
 
@@ -254,7 +276,8 @@ class Runtime:
             st, seat = rec.seats[i], names[i]
             X, Y = dp.lane_to_display(slot, seat.x_mm, seat.y_mm, d)
             seats.append({"index": i, "name": seat.name, "X": _r(X), "Y": _r(Y), "state": st.state,
-                          "source": st.source, "reason": st.reason, "at_y": _r(st.at_y_mm)})
+                          "source": st.source, "reason": st.reason, "at_y": _r(st.at_y_mm),
+                          "color": st.color, "color_reason": st.color_reason})
         ol = dp.lane_outline(slot, d)
         return {"slot": slot, "lane_number": slot + 1, "source": rec.source, "frozen": rec.frozen,
                 "label": [_r(v) for v in dp.lane_to_display(slot, 800.0, 1250.0, d)],
@@ -299,6 +322,14 @@ class Runtime:
         if self.trk is not None:
             st["heading_deg"] = _r(self.trk.heading, 2)
             st["distance_mm"] = _r(self.trk.distance_mm)
+        return st
+
+    def _camera_status(self) -> dict:
+        st = dict(self.camera.status()) if self.camera is not None else {"source": "off (config.CAMERA_ENABLED)"}
+        if self.trk is not None:
+            st.update({"frames_used": self.trk.camera_frames, "frames_no_pose": self.trk.camera_frames_no_pose,
+                       "pending": len(self.trk._color_pending)})
+        st["process_ms"] = self.camera_ms
         return st
 
     def _lidar_status(self) -> dict:

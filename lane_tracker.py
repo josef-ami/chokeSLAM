@@ -56,6 +56,17 @@ SEATS PER LANE (decisions #15, #19, #20, #23, #26)
         Frozen once y >= RECHECK_Y_MAX_MM.
     later visits (laps 2-3): the lap-1 result, no re-check.
 
+PILLAR COLOUR (checkpoint D, decisions #53-#65, color_id.py)
+    Every seat that becomes PRESENT (initialisation or entry re-check) gets a
+    colour request, once. on_camera_frame(frame, t) serves the requests: for
+    each pending seat, the lane pose at the frame's capture time t (#62) gives
+    the camera's view of the seat; frames where it is out of view don't count
+    (#63); the first in-view frame opens a COLOR_ID_WINDOW_S window with up to
+    COLOR_ID_MAX_ATTEMPTS in-view frames; the first confident read wins and is
+    never overwritten; otherwise UNKNOWN. A request still open when its lane is
+    left (the next turn) closes as UNKNOWN. Timed by the frames' own
+    timestamps only (#61), not by the LIDAR or STM32 loops.
+
 DE-SKEW (decision #38, deskew.py)
     Each STM32 sample is also integrated into an odometry pose (ox, oy,
     heading) in one fixed frame, and kept for DESKEW_HISTORY_S, timed on the
@@ -70,6 +81,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+import color_id
 import config
 import lane_frame as lf
 import seat_occupancy as so
@@ -90,6 +102,13 @@ class SeatState:
     reason: str = ""
     at_y_mm: float | None = None    # tracked y when decided (entry re-check)
     at_lane_index: int | None = None
+    # pillar colour (checkpoint D): None = not a PRESENT seat; "pending", "red", "green", "unknown"
+    color: str | None = None
+    color_reason: str = ""
+    color_attempts: int = 0          # in-view frames tried
+    color_out_of_view: int = 0       # frames in which the seat was out of the camera's view
+    color_window_t: float | None = None   # capture time of the first in-view frame (window start)
+    color_lane_index: int | None = None   # the lane (index) whose frame the seat is in
 
 
 @dataclass
@@ -155,6 +174,12 @@ class LaneTracker:
         for r in init.seats:
             start.seats[r.seat.index] = SeatState(r.state.value, "init", r.reason, init.y.y_mm, 0)
         self.lanes: dict[int, LaneRecord] = {0: start}
+        self._color_pending: list[tuple[int, int]] = []     # (slot, seat index)
+        self.camera_frames = 0            # frames offered while a colour request was open
+        self.camera_frames_no_pose = 0    # ... skipped: capture time outside the pose history
+        for i, st in start.seats.items():
+            if st.state == so.Occupancy.OCCUPIED.value:
+                self._request_color(0, i, 0)
         self._recheck_active = False
         self._event("start", f"{self.direction}, x {self.x:.0f}, y {self.y:.0f}, psi0 {self.psi0:+.2f} "
                              f"(wall-fit placement yaw)", first_sample.t_ms)
@@ -172,6 +197,11 @@ class LaneTracker:
     def last_sample(self) -> ImuSample:
         """The newest STM32 sample integrated (the tracked pose is as of this one)."""
         return self._last
+
+    @property
+    def wants_camera(self) -> bool:
+        """True while any PRESENT seat is waiting for its colour."""
+        return bool(self._color_pending)
 
     @property
     def wants_lidar(self) -> bool:
@@ -233,6 +263,7 @@ class LaneTracker:
         self.lane_north += -90.0 if self.direction == "CCW" else 90.0
         self.psi = _wrap180(self.heading - self.lane_north)
         self.lane_index += 1
+        self._close_colors_of_old_lanes(t_ms)
         why = "failsafe" if failsafe and not gated else "heading+y gate"
         self._event("turn", f"lane {self.lane_index - 1} -> {self.lane_index} (slot {self.slot}, lap {self.lap}) "
                             f"by {why}: old (x {old[0]:.0f}, y {old[1]:.0f}, psi {old[2]:+.1f}) -> "
@@ -315,6 +346,8 @@ class LaneTracker:
             if st.state == "unknown" and r.state is not so.Occupancy.UNKNOWN:
                 rec.seats[r.seat.index] = SeatState(r.state.value, "entry", r.reason,
                                                     round(y, 1), rec.first_lane_index)
+                if r.state is so.Occupancy.OCCUPIED:
+                    self._request_color(rec.slot, r.seat.index, rec.first_lane_index)
         return readings
 
     def _coverage_check(self, points, readings, rec) -> list:
@@ -358,6 +391,89 @@ class LaneTracker:
             out.append(r)
         return out
 
+    # -- pillar colour (checkpoint D) ---------------------------------------------------
+    def _request_color(self, slot: int, seat_index: int, lane_index: int) -> None:
+        st = self.lanes[slot].seats[seat_index]
+        if st.color is not None:                  # one request per seat, ever
+            return
+        st.color, st.color_lane_index = "pending", lane_index
+        st.color_reason = "pending: waiting for a camera frame with the seat in view"
+        self._color_pending.append((slot, seat_index))
+
+    def _close_color(self, slot: int, seat_index: int, color: str, reason: str) -> None:
+        st = self.lanes[slot].seats[seat_index]
+        st.color, st.color_reason = color, reason
+        self._color_pending.remove((slot, seat_index))
+
+    def _close_colors_of_old_lanes(self, t_ms: int) -> None:
+        for slot, i in list(self._color_pending):
+            st = self.lanes[slot].seats[i]
+            if st.color_lane_index is None or st.color_lane_index >= self.lane_index:
+                continue
+            if st.color_attempts:
+                why = f"lane left after {st.color_attempts} attempt(s) without a confident read ({st.color_reason})"
+            elif st.color_out_of_view:
+                why = f"never in the camera's view ({st.color_out_of_view} frames; last: {st.color_reason})"
+            else:
+                why = "no camera frames while in its lane"
+            self._close_color(slot, i, color_id.UNKNOWN, why)
+            self._event("color", f"slot {slot} seat {i}: UNKNOWN -- {why}", t_ms)
+
+    def on_camera_frame(self, frame, t_capture: float) -> int:
+        """One camera frame (raw, as captured) with its capture time on the Pi
+        clock. Serves the open colour requests; returns how many seats were
+        tried in it. Cheap when nothing is pending (returns 0 at once)."""
+        if not self._color_pending:
+            return 0
+        self.camera_frames += 1
+        t = t_capture - config.CAMERA_TIME_OFFSET_S
+        span = self._hist.span
+        lp = None if span is None or t < span[0] else self._hist.lane_pose_at(t)
+        if lp is None:                            # too old for the pose history, or across a lane switch
+            self.camera_frames_no_pose += 1
+            return 0
+        lane_index, x, y, psi = lp
+        seats = {s.index: s for s in so.seats()}
+        img, tried = None, 0
+        for slot, i in list(self._color_pending):
+            st = self.lanes[slot].seats[i]
+            if st.color_lane_index != lane_index:
+                continue
+            if st.color_window_t is not None and t - st.color_window_t > config.COLOR_ID_WINDOW_S:
+                self._close_color(slot, i, color_id.UNKNOWN,
+                                  f"{config.COLOR_ID_WINDOW_S:.2f} s window ended after {st.color_attempts} "
+                                  f"attempt(s) without a confident read ({st.color_reason})")
+                continue
+            seat = seats[i]
+            v = color_id.seat_view(x, y, psi, self.direction, seat.x_mm, seat.y_mm)
+            roi, why = color_id.pillar_roi(v.theta_deg, v.face_mm)
+            if roi is None:
+                st.color_out_of_view += 1
+                if st.color_window_t is None:
+                    st.color_reason = f"pending: {why}"
+                continue
+            if st.color_window_t is None:
+                st.color_window_t = t
+            if img is None:
+                img = color_id.correct_frame(frame)
+            st.color_attempts += 1
+            tried += 1
+            colour, rf, gf = color_id.classify(img, roi)
+            w, h = roi.size
+            desc = (f"attempt {st.color_attempts}/{config.COLOR_ID_MAX_ATTEMPTS}: red {rf:.0%}, green {gf:.0%} "
+                    f"in a {w}x{h} px box at {v.theta_deg:+.1f} deg, face {v.face_mm:.0f} mm "
+                    f"(lane pose x {x:.0f}, y {y:.0f}, psi {psi:+.1f})")
+            if colour is not None:
+                self._close_color(slot, i, colour, desc)
+                self._event("color", f"slot {slot} seat {i}: {colour.upper()} -- {desc}", self._last.t_ms)
+            elif st.color_attempts >= config.COLOR_ID_MAX_ATTEMPTS:
+                self._close_color(slot, i, color_id.UNKNOWN, f"no confident read; last {desc}")
+                self._event("color", f"slot {slot} seat {i}: UNKNOWN -- no confident read; last {desc}",
+                            self._last.t_ms)
+            else:
+                st.color_reason = f"pending: {desc}"
+        return tried
+
     def deskew_view(self, points, times) -> list:
         """A LIDAR frame de-skewed to the current pose, for display only (the
         dashboard's live scan); no seat check, no counters."""
@@ -375,11 +491,14 @@ class LaneTracker:
             "x_mm": round(self.x, 1), "y_mm": round(self.y, 1), "psi_deg": round(self.psi, 2),
             "psi0_deg": round(self.psi0, 2), "distance_mm": round(self.distance_mm, 1),
             "recheck_active": self._recheck_active,
+            "camera": {"frames": self.camera_frames, "frames_no_pose": self.camera_frames_no_pose,
+                       "pending": len(self._color_pending)},
             "lanes": {k: {"source": v.source, "frozen": v.frozen, "frames_used": v.frames_used,
                           "frames_skipped_align": v.frames_skipped_align,
                           "returns_dropped_old": v.returns_dropped_old, "max_shift_mm": round(v.max_shift_mm, 1),
                           "frames_skipped_old": v.frames_skipped_old, "empty_downgraded": v.empty_downgraded,
                           "seats": {i: {"state": s.state, "source": s.source, "reason": s.reason,
-                                        "at_y_mm": s.at_y_mm} for i, s in v.seats.items()}}
+                                        "at_y_mm": s.at_y_mm, "color": s.color, "color_reason": s.color_reason}
+                                    for i, s in v.seats.items()}}
                       for k, v in self.lanes.items()},
         }

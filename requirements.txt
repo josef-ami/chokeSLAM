@@ -1,6 +1,9 @@
 # Dashboard + core logic (works with just this, in mock mode)
 flask>=3.0
 numpy>=1.24
+# Checkpoint D (pillar colour): cv2.fisheye, HSV. On the Pi, `sudo apt install python3-opencv`
+# also works.
+opencv-python-headless>=4.8
 
 # Real hardware only (Raspberry Pi side) -- not installable/testable in the
 # sandbox this was built in (no network access to PyPI there), written
@@ -8,3 +11,5 @@ numpy>=1.24
 # lidar_probe.py experience before trusting lidar_source.py.
 rplidarc1
 pyserial
+# Checkpoint D camera on the Pi 5: `sudo apt install python3-picamera2` (comes with
+# Raspberry Pi OS; not on PyPI in a usable form for libcamera).

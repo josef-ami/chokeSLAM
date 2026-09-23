@@ -7,6 +7,7 @@ This is the running record of every change made to this repository from Septembe
 | **A** | Clockwise conventions, lane frame with x from the outer wall, removal of mat-level code, simulator heading fix, **direction (gap) test**, **initialisation of x / y / seats** | Implemented and tested. Real-robot scans analysed (§5.7); the approved changes from them are implemented (A.2, A.3); the LIDAR angle sign is **measured (−1)**, and the first scan's direction is **confirmed CW** (§5.7.3). **APPROVED (23 Sept, decision #34).** |
 | **B** | STM32 → Pi feed (BNO08x yaw + hall encoder), lane tracker, turn detection, lane switching, entry-corner seat re-check, simulated STM32 feed, `run_track.py` review tool, de-skew of the re-check's LIDAR frames (P9) | **APPROVED (23 Sept, decisions #37 and #39).** |
 | **C** | Dashboard rewritten lane by lane, mock mode in real time, tuning panel, Save run; fixes P10 and P11 to B's entry re-check | **APPROVED (23 Sept, decisions #45 and #46).** |
+| **D** | OV5647 fisheye camera for pillar colour ID only, keyed off PRESENT seat verdicts (the owner's draft, executed with four owner decisions on points the draft left open or got wrong) | **Implemented and tested in simulation (§15, decisions #53–#65). Awaiting approval.** Camera lever arm, height, bearing sign and colour thresholds are unmeasured (§15.8). |
 
 Nothing has been committed to git. Every change is an uncommitted edit on top of your last commit `dd9c8f4 added lane frame`, so `git diff` shows exactly what changed.
 
@@ -26,6 +27,9 @@ Nothing has been committed to git. Every change is an uncommitted edit on top of
 10. [Checkpoint C: the dashboard](#10-checkpoint-c-the-dashboard)
 11. [Things to measure or set on the real robot](#11-things-to-measure-or-set-on-the-real-robot)
 12. [How to run](#12-how-to-run)
+13. [Portable STM32 stream snippet](#13-portable-stm32-stream-snippet-50-awaiting-approval)
+14. [The obstacle-round v7 firmware as the STM32 side](#14-the-obstacle-round-v7-firmware-as-the-stm32-side-52-awaiting-approval)
+15. [Checkpoint D: pillar colour identification](#15-checkpoint-d-pillar-colour-identification-ov5647-fisheye)
 
 ---
 
@@ -119,15 +123,27 @@ These are the owner's answers, numbered in the order they were asked.
 
 | 45 | Checkpoint C approval (§10.9 items 1–6) | **Approved, all items:** the display frame, the drawing, the panel, the runtime (Initialise / Re-initialise, loop order, stream, Save run), the tuning panel, mock mode |
 | 46 | P10 and P11 fixes (§10.7, §10.9 items 7–8) | **Approved, both:** frames judged at their end (late frames inside their window still count; frames the history doesn't fully cover are skipped), and the coverage check that turns an EMPTY with a hole in its window into UNKNOWN |
-
 | 47 | STM32 firmware scope | **Sensor bridge only:** stream `$IMU` at 100 Hz; motor held off, servo held straight |
 | 48 | STM32 toolchain | **Arduino IDE + STM32duino** |
 | 49 | Debug lines from the STM32 | **None:** only `$IMU` lines go over USB; status on LED1 only |
 | 50 | Portable stream snippet | `firmware/chokeslam_stream/chokeslam_stream.h`: protocol only, no hardware; the host sketch passes encoder, raw yaw, valid flag (§13) — **awaiting approval** |
 | 51 | Bridge status LED | **"rewrite the stm32 bridge sketch to show error over pc13":** the status blink moves from LED1 (PB12, not connected on the robot) to the Black Pill's on-board LED, PC13 (lit when LOW). Codes unchanged: fast 100 ms = IMU fault (not found at boot or no report for 100 ms), slow 500 ms = IMU fine but no line got out for 200 ms, solid = streaming. PB12–PB14 are held off. Constantly off after boot = firmware not running |
 | 52 | Pi side and the obstacle-round v7 firmware | **"Add a stream to this sketch"; chokeSLAM alone owns the port.** `firmware/obstacle_round_stream/` = the owner's v7 sketch + `chokeslam_stream.h` sending the unchanged `$IMU` line. The Pi now **skips `#` and `!` lines** (counted as firmware log, shown on the bench and dashboard) instead of counting them bad; this relaxes #49 on the Pi side (§14) — **awaiting approval** |
+| 53 | (D, draft #47) Camera lever arm | Co-located with the LIDAR's mount, **exact offset unmeasured**. Own keys `CAMERA_OFFSET_FORWARD_MM` / `_LATERAL_MM` (+ left, as the LIDAR), placeholder = the LIDAR's values |
+| 54 | (D, draft #48) Camera mount | Optical axis horizontal, forward, boresighted at 0°. Body upside-down → `CAMERA_ROTATE_180`, applied in exactly one place (`color_id.correct_frame`) |
+| 55 | (D, draft #49) Trigger | The moment a seat becomes PRESENT (init or entry re-check), once per seat |
+| 56 | (D, draft #50) Retry | Up to `COLOR_ID_MAX_ATTEMPTS` (5) frames within `COLOR_ID_WINDOW_S` (0.3 s); first confident read wins; else UNKNOWN. **Values proposed, pending approval.** The window's start is changed by #63 |
+| 57 | (D, draft #51) Output | New fields on the seat record: `color` (`red` / `green` / `unknown`, `pending` while open) and `color_reason`. The draft named `SeatReading`; the stored per-seat record is `lane_tracker.SeatState`, so the fields went there |
+| 58 | (D, draft #52) Lens model | The supplied `cv2.fisheye` calibration, used directly. **The draft's "~160° HFOV" does not match it** (see #63) |
+| 59 | (D, draft #53) Vertical framing | The owner confirms the pillar is in frame at every expected range (120 mm and up). The ROI's vertical extent is set by #65 |
+| 60 | (D, draft #54) Runtime | OpenCV + numpy in Python, next to `lane_tracker.py` |
+| 61 | (D, draft #55) Colour-ID clock | The camera's own frames and timestamps; nothing is timed against `SweepClock` / `LinkClock` or the LIDAR's spin |
+| 62 | (D) Which pose a frame is judged from | **"Pose at capture":** each frame uses the lane pose at its own capture time (`PoseHistory.lane_pose_at`) plus the camera lever arm, recomputed per frame from the seat's fixed lane position. This replaces the draft's "bearing stored on the seat" (D.2.7), which would be up to 300 mm stale by the end of the 0.3 s window |
+| 63 | (D) Field of view | The K/D at 640×480 give image edges at about +46° / −50° and a polynomial that folds back at 61.3° (70° would land on column 629, 80° on column 25). **"Wait until it comes into view":** only boxes entirely below the fold with their centre in the image are used. Out-of-view frames use no attempts; the window opens at the first in-view frame; a request still open when its lane is left closes as UNKNOWN |
+| 64 | (D) Capture | **Picamera2** at 640×480 (`RGB888` = BGR for OpenCV) in a background thread, newest frame only, stamped with the sensor timestamp on `time.monotonic()` (checked; arrival time as fallback, counted) |
+| 65 | (D) ROI height; dashboard | **"From camera height":** new key `CAMERA_HEIGHT_MM` (unmeasured, placeholder 150). The box is the pillar's near face (50 × 100 mm) from floor to top, projected through the lens and widened 1.5×. **"Colour the seats":** PRESENT seats filled red/green once identified (amber while pending or UNKNOWN); hover and Lanes panel show colour and reason; a Camera card |
 
-All three checkpoints are approved: A (#34), B (#37, #39) and C (#45, #46). What is left is measuring and checking on the real robot (§11). The STM32 bridge firmware (`firmware/stm32_imu_bridge/`, decisions #47–#49) awaits approval: it could not be compiled here (the Arduino toolchain can't be downloaded in this sandbox), so its first build is on your machine. The portable snippet (#50, §13) also awaits approval. The bridge shows its status on the on-board LED PC13 (#51). The obstacle-round firmware with the stream added, and the Pi skipping its log lines (#52, §14), await approval.
+All three checkpoints are approved: A (#34), B (#37, #39) and C (#45, #46). What is left is measuring and checking on the real robot (§11). The STM32 bridge firmware (`firmware/stm32_imu_bridge/`, decisions #47–#49) awaits approval: it could not be compiled here (the Arduino toolchain can't be downloaded in this sandbox), so its first build is on your machine. The portable snippet (#50, §13) also awaits approval. The bridge shows its status on the on-board LED PC13 (#51). The obstacle-round firmware with the stream added, and the Pi skipping its log lines (#52, §14), await approval. Checkpoint D (pillar colour, #53–#65, §15) is implemented and awaits approval.
 
 ## 4. Conventions
 
@@ -1367,6 +1383,10 @@ Both showed up only as rare wrong seat verdicts when the dashboard loop fell beh
 | (B) Heading drift | — | Leave the robot still for a minute in `--bench`. `heading` should barely move. Drift is the one tracking error that accumulates (§8.2). |
 | (B) Standing still at the start | — | For `run_track.py --real`, keep the robot still until the initialisation report appears. The scan must not be smeared. Motion after the scan is counted. |
 | (C) Dashboard mode | `config.MODE` | `"real"` for the robot (STM32 and LIDAR start with the server), `"mock"` for the simulation. Then press **Initialise** with the robot standing still at its start. |
+| (D) Camera mount: 180° and bearing sign | `CAMERA_ROTATE_180` (True), `CAMERA_BEARING_SIGN` (+1, **unmeasured**) | One pillar 30° to the robot's right, 500 mm from the lens: `python3 camera_check.py --real --bearing 30 --range 500`. The magenta box must sit on the pillar. Box on the mirror side → flip the sign; image upside-down → flip the rotation (§15.8) |
+| (D) Camera lever arm and height | `CAMERA_OFFSET_FORWARD_MM`, `_LATERAL_MM` (+ left), `CAMERA_HEIGHT_MM` (**unmeasured**; placeholders: LIDAR's offsets, 150 mm) | Measure the lens position from the pose reference point and its height above the mat. With the check above, a box too high or too low means the height is wrong |
+| (D) Colour thresholds | `COLOR_RED_HUE`, `COLOR_GREEN_HUE`, `COLOR_MIN_SAT`, `COLOR_MIN_VAL`, `COLOR_ID_MIN_FRACTION`, `COLOR_ID_MARGIN_RATIO` (**placeholders**) | Run `camera_check.py` on a red and a green pillar under the competition/practice lighting at a few ranges; it prints both fractions. Send the `_raw.png` frames for calibration |
+| (D) Camera timing and rate | `CAMERA_TIME_OFFSET_S` (0) | The dashboard's Camera card shows the frame rate, frames skipped for having no pose, and "timestamps not on the Pi clock" (should stay 0). Check the rate with LIDAR + STM32 running |
 | (B, P9) LIDAR vs STM32 delay | `config.LIDAR_TIME_OFFSET_S` (0 until measured) | Run `python3 measure_lidar_delay.py --real --record delay.json`. Keep the robot still, then turn it on the spot ±30° about once a second when told (§9.11.4), then put the printed value in config. Repeat if it says NOT RELIABLE. Send `delay.json` if the result looks odd; `--replay` re-analyses it. |
 
 ## 12. How to run
@@ -1403,6 +1423,10 @@ python3 run_track.py --sim --speed 1000 --no-deskew     # P9 without the fix (wr
 python3 test_display.py            # the fixed loop frame vs the tracker's corner transform
 python3 test_dashboard.py          # mock end to end, tuning, lagging loop, real mode with stand-in hardware (~1 min)
 python3 dashboard_server.py        # then open http://<pi-or-localhost>:5056/ ; config.MODE "real" or "mock"
+
+# checkpoint D (pillar colour):
+python3 test_color_id.py           # projection, view limits, 1600 synthetic views, pose at capture, retry/window, 24 runs (~1.5 min)
+python3 camera_check.py --real --bearing 30 --range 500     # on the Pi: bench check of the camera mount (§15.8)
 
 # the LIDAR vs STM32 delay (P9):
 python3 measure_lidar_delay.py --real --record delay.json   # on the Pi (§9.11.4)
@@ -1475,3 +1499,144 @@ The owner's v7 sketch, unchanged except for these additions (40 diff lines):
 - All 13 suites pass.
 - The firmware file was not compiled, because the STM32duino toolchain can't be downloaded here. The stream header itself was host-tested (§13.4).
 
+
+## 15. Checkpoint D: pillar colour identification (OV5647 fisheye)
+
+**Status: implemented and tested in simulation; awaiting approval.** The owner supplied a design draft (`checkpoint_d_draft.md`) and said "execute this". Before building, five points were raised with the owner where the draft was ambiguous, wrong for this codebase, or left open. The four answers are decisions #62–#65; the draft's own decisions are #53–#61, renumbered because #47–#52 were already taken.
+
+### 15.1 What it is, and isn't
+The camera answers one question: **for a seat the LIDAR has already called PRESENT, is the pillar RED or GREEN?** It never detects, locates or confirms a pillar; that stays with `seat_occupancy.py`. It adds a colour to PRESENT seats and changes nothing upstream of a PRESENT verdict. UNKNOWN is a legitimate final answer and is never turned into a guess.
+
+### 15.2 Where this differs from the draft, and why
+| Draft | Built | Why |
+|---|---|---|
+| Decisions #47–#55, "last used #46" | #53–#61 | #47–#52 were used after the draft was written (STM32 firmware) |
+| Input fields `SeatReading.bearing_deg` / `range_mm` | Recomputed per frame from the seat's lane position (#62) | Those fields don't exist. `SeatReading` has `predicted_rel_bearing_deg` / `expected_face_mm`, computed for the LIDAR frame's pose. More importantly, each camera frame is taken later than that pose |
+| "Use the pose recorded on the seat" (D.2.7) | The pose at the frame's capture time (#62) | Over a 0.3 s window at 1 m/s the robot moves 300 mm. The stored bearing is then wrong by 10–30° for a pillar 500 mm away. Measured: `test_pose_at_capture_time`, 20/20 right vs 0/20 with the pose 250 mm later. This is P11's own principle (judge a frame from the pose of its own moment) applied to the camera |
+| ~160° HFOV | ~96° usable; fold at 61.3° (#63) | The supplied K/D at 640×480 put the image edges at about +46° / −50°, and the polynomial r(θ) stops increasing at 61.3°. `projectPoints` then returns wrong pixels that look valid (70° → column 629) |
+| Vertical: fixed band around v_center | The pillar's 0–100 mm face projected from `CAMERA_HEIGHT_MM` (#65) | v_center of a horizontal ray is the horizon. With the lens above 100 mm the whole pillar is below it, and a fixed band either misses it at close range or is mostly background at long range |
+| Output on `SeatReading.color` | `SeatState.color` / `color_reason` (#57) | `SeatReading` is one frame's detector output; the kept per-seat record is `SeatState` |
+| "Pi 4" (D.4) | Pi 5 | The project's Pi is a Pi 5 (§1) |
+| Capture unspecified | Picamera2 (#64) | On a Pi 5 the CSI camera runs through libcamera |
+| Dashboard unspecified | Seats coloured, Camera card (#65) | Owner's choice |
+| — | `camera_sim.py`, mock-mode camera, `run_mock(camera_hz=...)`, `camera_check.py` | D.4 asks for synthetic frames at known bearings and ranges and a bench sign-check; these provide them |
+
+### 15.3 Geometry (`color_id.py`)
+- **Frame correction (#54):** `correct_frame(raw)` rotates 180° when `CAMERA_ROTATE_180`. It is the only place the mount is known about, and everything downstream takes a corrected frame.
+- **Camera position:** `lf.offset_in_lane(x, y, psi, direction, CAMERA_OFFSET_FORWARD_MM, CAMERA_OFFSET_LATERAL_MM)`, which is the same helper the LIDAR lever arm uses.
+- **Seat as seen from the camera:** `seat_view` gives the bearing from the camera to the seat centre (`lf.bearing_of`, clockwise) minus ψ. That is θ, the horizontal angle off the optical axis (+ = the robot's right). The near face is at the seat-centre distance − 25 mm.
+- **Camera coordinates:** OpenCV's (x right, y down, z forward), with tilt 0 (#54). A point at horizontal distance d, angle φ and height h above the floor is `(SIGN · d sin φ, CAMERA_HEIGHT_MM − h, d cos φ)`. `CAMERA_BEARING_SIGN` flips the x axis of a mirrored camera, so the principal point stays where the calibration put it.
+- **Projection (#58):** `cv2.fisheye.projectPoints` with the supplied K and D, the single source of truth. `test_projection_matches` checks it against the polynomial written out by hand: u = cx + fx·θ(1 + D0θ² + D1θ⁴ + D2θ⁶ + D3θ⁸). The two agree to 1e-13 px over −45…+45°.
+- **Fold angle:** `fold_deg()` finds numerically, in 0.01° steps, where r(θ) stops increasing. For the supplied D that is 61.32°.
+
+### 15.4 The box (ROI) and the colour test
+- **Box (#65):** the four corners of the pillar's near face: horizontal angles θ ± atan(25 / face) at distance `face`, and heights 0 and 100 mm. They are projected, their pixel bounding box is taken, and it is widened by `COLOR_ID_ROI_MARGIN_FACTOR` (1.5) about its centre, then clipped to the image.
+- **In view (#63)** requires both of these:
+  - every corner is less than `fold_deg()` off the optical axis, measured as the full 3D angle, so a pillar very close below the lens is also caught;
+  - the box centre is inside the 640 × 480 image.
+
+  Otherwise the reason is recorded (for example "part of the pillar is 83° off the optical axis").
+- **Colour (15.4 of the draft):** the box is converted to HSV, and a pixel counts only if S ≥ `COLOR_MIN_SAT` (80) and V ≥ `COLOR_MIN_VAL` (50).
+  - Red is H in 0–10 or 170–179 (red wraps around 0/180). Green is H in 40–85.
+  - The read is **confident** if the larger fraction is at least `COLOR_ID_MIN_FRACTION` (0.30) and at least `COLOR_ID_MARGIN_RATIO` (2×) the other.
+  - **All of these are placeholders until real-lighting frames exist.**
+
+### 15.5 Requests (`lane_tracker.py`)
+- **Opened (#55):** once per seat, when it becomes PRESENT: in `LaneTracker.__init__` for initialisation seats, and in `on_lidar_frame` when an entry re-check first decides OCCUPIED. The request records the lane index whose frame the seat is in, and sets `color = "pending"`. `wants_camera` is true while any request is open.
+- **`on_camera_frame(frame, t_capture)`** returns at once if nothing is pending. Otherwise:
+  1. t = t_capture − `CAMERA_TIME_OFFSET_S`.
+  2. The lane pose at t comes from the pose history (#62). If t is older than the history (0.5 s) or falls across a lane switch, the frame is skipped and counted (`camera_frames_no_pose`).
+  3. For each pending seat of that lane:
+     - If its window is open and t is more than `COLOR_ID_WINDOW_S` past the window's start, it closes as UNKNOWN ("window ended after k attempts").
+     - Otherwise the box is computed. If the seat is out of view, `color_out_of_view` is incremented and no attempt is used (#63).
+     - Otherwise the first in-view frame opens the window, the frame is corrected (once per frame), the attempt counter goes up, and `classify` runs.
+     - A confident read closes the request with that colour and an event. The fifth unconfident attempt closes it as UNKNOWN ("no confident read").
+- **Lane change:** at every turn, requests whose lane has been left close as UNKNOWN, with the reason:
+  - "never in the camera's view (N frames; last: …)",
+  - "lane left after k attempt(s) …", or
+  - "no camera frames while in its lane".
+- **Never overwritten:** a closed colour is final, the same rule as "first decided verdict is kept". Later laps create no requests, because the lap-1 record is reused.
+- **Recorded on each seat:** `color`, `color_reason` (fractions, box size, θ, face range and the pose used), `color_attempts`, `color_out_of_view`, `color_window_t`, `color_lane_index`. `state()` reports `color` and `color_reason` per seat, plus camera counters.
+- **Clock (#61):** only the frames' own timestamps open and close windows. Nothing is tied to the LIDAR's spin or to the STM32 loop.
+
+### 15.6 Capture and runtime
+- **`camera_source.Picamera2Source` (#64):**
+  - Picamera2 video configuration at `CAMERA_WIDTH × CAMERA_HEIGHT` in "RGB888", which is stored as B, G, R, the order OpenCV expects. It runs in a background thread and keeps only the newest `(frame, t_capture, frame_no)`.
+  - `t_capture` is libcamera's `SensorTimestamp` (CLOCK_MONOTONIC, the clock `time.monotonic()` reads). If a stamp is more than 1 s from its arrival time, the arrival time is used instead and counted.
+  - Picamera2 is imported lazily, and an open failure is shown, not raised.
+  - **The camera must run in the mode it was calibrated in.**
+- **Dashboard (`dashboard_server.py`):** `_feed_camera()` runs after `_feed_imu()` in each loop pass, so the pose history reaches the frame. It hands over a new frame only while `trk.wants_camera`, and records how long it took. Measured in mock mode: 0.4–0.5 ms per frame (rotation plus the small HSV box). The Camera card shows:
+  - source and errors, frames and rate
+  - frames used and frames skipped for having no pose
+  - seats waiting for a colour, the last processing time
+  - timestamp fallbacks
+- **Real mode** opens the camera when `config.CAMERA_ENABLED` is true.
+- **Seats on the map:** a PRESENT seat is amber while its colour is pending or UNKNOWN, and red or green once identified. The hover text and the Lanes chips show the colour and its reason. In mock mode, a colour that disagrees with the truth gets the red ring.
+- **Mock mode (`live_sim.py`):**
+  - Each pillar gets RED or GREEN from its own random stream (seed + 3000), so pillar positions and all other noise are unchanged.
+  - `.camera.get_latest_frame()` renders from the true pose at the current simulated time, at most 15 frames per simulated second, stamped like the STM32 samples.
+  - `truth()["colors"]` gives the true colours.
+- **`simulation.run_mock(camera_hz, camera_delay_s)`** does the same offline for tests. `out["colors"]` compares identified colours with the truth.
+
+### 15.7 Simulated frames (`camera_sim.py`) and verification
+- **Renderer:** every pixel is turned into a ray with `cv2.fisheye.undistortPoints`, the inverse direction to the code under test, and cast into a 3D world:
+  - pillars are 50 × 50 × 100 mm boxes;
+  - the floor is the white mat inside the field and black outside it or on the island;
+  - everything else is black walls;
+  - pixels beyond the fold radius are black.
+
+  The frame is then made the way the camera delivers it (mirrored when the sign is −1, rotated 180° when `CAMERA_ROTATE_180`), plus noise with σ 6. It takes about 30 ms per frame.
+- **`test_color_id.py`:**
+
+| Test | Result |
+|---|---|
+| Projection vs hand polynomial | equal to 1e-13 px, −45…+45° |
+| View limits | fold 61.32°; 70° (which would land on column 629) rejected; 55° outside the image; 40° in view; a pillar 60 mm away rejected |
+| 400 random views (150–1700 mm, −48…48°) × 4 mount conventions | 393 right, **0 wrong**, 0 not confident, 7 out of view, in every convention |
+| Frames from a +1 camera read as −1 | 100/100 not confident, 0 read: a wrong sign shows up as no reads, not wrong colours |
+| Pose at capture (#62) | 20/20 right with the capture-time pose; 0/20 with the pose 250 mm later |
+| Wait until in view (#63) | turned away: out of view, no attempt used; turned back: GREEN on attempt 1. Never in view: UNKNOWN at the lane change |
+| Attempts and window | a grey pillar: UNKNOWN after 5 attempts with frames 66 ms apart; UNKNOWN when the 0.3 s window ended (4 attempts) with frames 100 ms apart |
+| End to end, 24 one-lap runs (CCW/CW, 6 seeds, 600 mm/s, and 1000 mm/s with frames 150 ms late) | **104 colours right, 0 wrong, 14 UNKNOWN, 0 left pending**. All 14 are "never in the camera's view": 8 initialisation seats on the middle row (beside the robot at its start) and 6 entry seats on the near row (decided when already beside the robot) |
+
+- `test_dashboard.py` mock run: pillar colours 3 right, 0 wrong. `docs/dashboard_colours.png` shows mock mode after a lap.
+- **All 14 suites pass.**
+
+**Limits to know**
+- **Forward camera:** a seat that is beside or behind the robot for its whole lane is never seen and ends UNKNOWN. In simulation that was 14 of 118 PRESENT seats: middle-row seats at initialisation and near-row seats decided late in the entry re-check.
+- **No occlusion model:** a nearer pillar in front of the seat's box would be read instead. The margin factor keeps the box close to one pillar, but two pillars in line are possible.
+- **Simulated colours are ideal:** real lighting, glare and the magenta parking walls are not modelled. The thresholds are unvalidated placeholders.
+- **Tilt is taken as 0 (#54).** A tilted mount shifts every box vertically. `camera_check.py` shows that.
+
+### 15.8 Things to measure before this is trusted (also in §11)
+1. **Mount check:** put one pillar 30° to the robot's right, 500 mm from the lens, and run `python3 camera_check.py --real --bearing 30 --range 500`. The magenta box must sit on the pillar:
+   - mirrored → flip `CAMERA_BEARING_SIGN`;
+   - image upside-down → flip `CAMERA_ROTATE_180`;
+   - too high or too low → fix `CAMERA_HEIGHT_MM`.
+2. **Lever arm and height:** measure `CAMERA_OFFSET_FORWARD_MM`, `_LATERAL_MM` (+ left) and `CAMERA_HEIGHT_MM` from the pose reference point and the mat.
+3. **Colour calibration:** `camera_check.py` on a red and a green pillar at 300, 700 and 1200 mm under the real lighting. It prints both fractions. Send the `_raw.png` frames.
+4. **Rate and timing:** with LIDAR, STM32 and camera running, the dashboard's Camera card should show a steady rate, 0 "timestamps not on the Pi clock", and few frames skipped for no pose. `CAMERA_TIME_OFFSET_S` stays 0 until measured.
+5. **Calibration mode:** the camera must run in the mode K/D were calibrated in. If the calibration really is ~160° across, it was probably made in a different mode, and K/D should be re-supplied for 640×480.
+
+### 15.9 Files
+- **New:**
+  - `color_id.py` (geometry and colour test)
+  - `camera_source.py` (Picamera2)
+  - `camera_sim.py` (simulated frames)
+  - `camera_check.py` (bench check)
+  - `test_color_id.py`
+  - `docs/dashboard_colours.png`
+- **Changed:**
+  - `config.py`: the camera and colour keys
+  - `lane_tracker.py`: colour fields on `SeatState`, requests, `on_camera_frame`, lane-change close, `wants_camera`, `state()`
+  - `dashboard_server.py`: the camera source, `_feed_camera`, colour in seats and truth, the Camera status
+  - `templates/dashboard.html`: seat fill colours, legend, hover and chips, the Camera card
+  - `live_sim.py`: pillar colours and the simulated camera
+  - `simulation.py`: `run_mock(camera_hz, camera_delay_s)` and the colour comparison
+  - `test_dashboard.py`: the colour check
+  - `requirements.txt`
+
+### 15.10 For approval
+1. The four owner decisions as built: pose at capture (#62), wait until in view (#63), Picamera2 (#64), box from camera height and the dashboard (#65).
+2. The draft's values, still proposals: 0.3 s window, 5 attempts, 30% fraction, 2× margin, 1.5× box; plus the placeholders `CAMERA_HEIGHT_MM` = 150 and the HSV ranges.
+3. The additions the draft didn't name: the simulated camera in mock mode and `run_mock`, and `camera_check.py`.

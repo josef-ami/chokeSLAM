@@ -71,6 +71,20 @@ def test_mock_end_to_end():
     assert st["direction"] == "CW" and _wrong(st) == 0, st["lanes"]
     decided = sum(1 for lane in st["lanes"] for s in lane["seats"] if s["state"] != "unknown")
     assert worst < 30.0, worst
+    # checkpoint D: colours of PRESENT seats vs the simulated truth
+    col_right = col_wrong = col_other = 0
+    for lane in st["lanes"]:
+        tc = st["truth"]["colors_by_slot"][str(lane["slot"])]
+        for s in lane["seats"]:
+            if s["color"] in ("red", "green"):
+                if tc.get(str(s["index"])) == s["color"]:
+                    col_right += 1
+                else:
+                    col_wrong += 1
+            elif s["color"] is not None:
+                col_other += 1
+    assert col_wrong == 0 and col_right >= 1, st["lanes"]
+    assert st["camera"]["source"] == "simulated" and st["camera"]["frames_used"] > 0, st["camera"]
     static = c.get("/api/static").get_json()
     assert static["init_id"] == st["init_id"] and len(static["init_scan"]) > 300 and len(static["truth_pillars"]) >= 4
     # the stream: the first event is a full state
@@ -94,7 +108,8 @@ def test_mock_end_to_end():
     st = c.get("/api/state").get_json()
     assert st["init_id"] == old + 1 and len(st["lanes"]) == 1 and st["tracker"]["lane_index"] == 0
     print(f"PASS  test_mock_end_to_end          CW, start lane slot 1, 3 laps at 4x: lanes appeared one per turn "
-          f"(1 -> 4), 12 turns, {decided} seat verdicts, 0 disagree with the truth; drawn robot within "
+          f"(1 -> 4), 12 turns, {decided} seat verdicts, 0 disagree with the truth; pillar colours {col_right} right, "
+          f"0 wrong, {col_other} unknown; drawn robot within "
           f"{worst:.1f} mm of the true one; stream serves the state; Save run replays to the same 12 turns; "
           f"Re-initialise starts over at lane 1")
     return rt

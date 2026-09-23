@@ -367,6 +367,7 @@ def run_mock(direction: str = "CCW", start_slot: int = 0, y_start: float = 1400.
              radius: float = 400.0, lidar_hz: float = 10.0, placement_yaw_deg: float = 0.0,
              yaw_drift_deg_s: float = 0.01, lidar_sweep: bool = True, deskew: bool = True,
              lidar_stamp_error_s: float = 0.0, imu_latency_s: float = 0.002, lidar_delay_s: float = 0.0,
+             camera_hz: float = 0.0, camera_delay_s: float = 0.0,
              verbose: bool = False) -> dict:
     """Initialise from a simulated start scan, then drive `laps` laps feeding
     the tracker simulated STM32 lines (100 Hz) and, while it asks for them,
@@ -390,7 +391,13 @@ def run_mock(direction: str = "CCW", start_slot: int = 0, y_start: float = 1400.
     lidar_delay_s: each frame reaches the tracker this long after it was
     taken (the tracker has integrated that much more STM32 data by then), as
     when the Pi is busy -- the frame must still be judged from where it was
-    taken."""
+    taken.
+    camera_hz > 0 (checkpoint D): each pillar gets a colour (RED / GREEN, own
+    random stream seed + 3000, so the world and every other stream are
+    unchanged) and, while the tracker has a colour request open, a camera
+    frame (camera_sim.render, from the true pose) is handed over camera_hz
+    times a second, stamped capture time + imu_latency_s, camera_delay_s after
+    it was taken. out["colors"] compares the identified colours with the truth."""
     import lane_init as li
     from lane_tracker import LaneTracker
     from scan_processing import clean_and_project, clean_and_project_timed
@@ -402,6 +409,10 @@ def run_mock(direction: str = "CCW", start_slot: int = 0, y_start: float = 1400.
                                                      wander_mm, radius)
     gx, gy, brg = path.pose(s0)
     x0, y0 = lf.global_to_lane(start_sec, direction, gx, gy)
+    if camera_hz > 0:
+        color_rng = random.Random(seed + 3000)
+        for p in pillars:
+            p.color = color_rng.choice(["red", "green"])
 
     def scan_points(gx, gy, brg):
         raw = simulate_scan(gx, gy, brg, pillars, n_points=720, rng_noise=rng,
@@ -450,6 +461,12 @@ def run_mock(direction: str = "CCW", start_slot: int = 0, y_start: float = 1400.
     errs, herrs, n_step = [], [], 0
     from collections import deque
     late, delay_steps = deque(), int(round(lidar_delay_s / 0.01))
+    cam_late, cam_delay_steps = deque(), int(round(camera_delay_s / 0.01))
+    cam_every = int(round(100.0 / camera_hz)) if camera_hz > 0 else 0
+    if cam_every:
+        import numpy as _np
+        import camera_sim
+        cam_rng = _np.random.default_rng(seed + 4000)
     out["init_err_mm"] = (init.x.x_mm - x0, init.y.y_mm - y0)
     while s < s_end:
         t_ms += 10
@@ -468,6 +485,13 @@ def run_mock(direction: str = "CCW", start_slot: int = 0, y_start: float = 1400.
         while late and late[0][0] <= n_step:
             _, pts, times = late.popleft()
             trk.on_lidar_frame(pts, times)
+        if cam_every and trk.wants_camera and n_step % cam_every == 0:
+            cx, cy = camera_sim.camera_global(gx, gy, brg)
+            cam_late.append((n_step + cam_delay_steps, camera_sim.render(cx, cy, brg, pillars, cam_rng),
+                             t_ms / 1000.0 + imu_latency_s))
+        while cam_late and cam_late[0][0] <= n_step:
+            _, frame, t_cap = cam_late.popleft()
+            trk.on_camera_frame(frame, t_cap)
         # tracked pose -> global, via the lane the tracker believes it is in
         sec = path.section(start_slot + trk.lane_index)
         tx, ty = lf.lane_to_global(sec, direction, trk.x, trk.y)
@@ -490,6 +514,31 @@ def run_mock(direction: str = "CCW", start_slot: int = 0, y_start: float = 1400.
                 wrong += 1
         seat_cmp[slot] = {"section": sec, "source": rec.source, "right": right, "wrong": wrong,
                           "unknown": unknown, "frames": rec.frames_used}
+    if cam_every:
+        truth_col = {}
+        for sec in lf.SECTIONS:
+            for seat in so.seats():
+                sx, sy = lf.lane_to_global(sec, direction, seat.x_mm, seat.y_mm)
+                for p in pillars:
+                    if math.hypot(p.x_mm - sx, p.y_mm - sy) < 1.0:
+                        truth_col[(sec, seat.index)] = p.color
+        col = {"right": 0, "wrong": 0, "unknown": 0, "pending": 0, "not_a_pillar": 0, "details": []}
+        for slot, rec in trk.lanes.items():
+            sec = path.section(start_slot + slot)
+            for i, st in rec.seats.items():
+                if st.color is None:
+                    continue
+                tc = truth_col.get((sec, i))
+                if st.color in ("pending", "unknown"):
+                    col[st.color] += 1
+                elif tc is None:
+                    col["not_a_pillar"] += 1
+                elif st.color == tc:
+                    col["right"] += 1
+                else:
+                    col["wrong"] += 1
+                col["details"].append((slot, i, st.color, tc, st.color_reason))
+        out["colors"] = col
     errs_sorted = sorted(errs)
     out.update({
         "ok": True, "tracker": trk, "turns": len(turns), "expected_turns": 4 * laps,

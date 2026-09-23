@@ -135,6 +135,49 @@ DESKEW_HISTORY_S = 0.5
 # (docs/CHANGES.md section 11). 0 until measured.
 LIDAR_TIME_OFFSET_S = 0.0
 
+# --- Pillar colour ID, OV5647 fisheye (checkpoint D, decisions #53-#65) -----
+# The camera only answers "RED or GREEN?" for a seat the LIDAR already called
+# PRESENT (colour_id.py). Everything below marked UNMEASURED must be set on the
+# robot (docs/CHANGES.md section 15.8); until then colour ID is not trusted.
+CAMERA_ENABLED = True               # real mode: open the camera (Picamera2) in the dashboard
+# Lever arm (#53): lens position relative to the pose reference point, like
+# LIDAR_OFFSET_*. UNMEASURED -- placeholder = the LIDAR's own offsets.
+CAMERA_OFFSET_FORWARD_MM = LIDAR_OFFSET_FORWARD_MM   # <-- MEASURE
+CAMERA_OFFSET_LATERAL_MM = LIDAR_OFFSET_LATERAL_MM   # <-- MEASURE (+ = LEFT, as the LIDAR)
+# Lens height above the floor (#65). UNMEASURED -- placeholder.
+CAMERA_HEIGHT_MM = 150.0                             # <-- MEASURE
+# Mount (#54): optical axis horizontal, facing forward; body upside-down ->
+# every frame is rotated 180 deg in exactly one place (colour_id.correct_frame).
+CAMERA_ROTATE_180 = True
+# +1: a seat to the robot's right (+bearing) appears right of centre in the
+# corrected frame; -1: mirrored. UNMEASURED -- bench-check (section 15.8).
+CAMERA_BEARING_SIGN = +1                             # <-- BENCH-CHECK
+# Calibration (#58): cv2.fisheye (equidistant, 4 coefficients) at 640x480.
+# The camera must run in the same mode it was calibrated in.
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+CAMERA_K = [[383.20119761034823, 0.0, 330.52849471706367],
+            [0.0, 383.4524308500294, 228.5909870627763],
+            [0.0, 0.0, 1.0]]
+CAMERA_D = [0.05460518934568049, -0.3105792203926291, 0.538008476718999, -0.3104152610068569]
+# How much later a frame's timestamp is than the moment it shows (s), like
+# LIDAR_TIME_OFFSET_S. UNMEASURED -- 0.
+CAMERA_TIME_OFFSET_S = 0.0
+# Retry policy (#56), proposed values: the window opens at the first frame in
+# which the seat is in view (#63) and allows up to MAX_ATTEMPTS in-view frames
+# within WINDOW_S; first confident read wins, otherwise UNKNOWN.
+COLOR_ID_WINDOW_S = 0.3
+COLOR_ID_MAX_ATTEMPTS = 5
+# Classification (15.4) -- PLACEHOLDERS until real-lighting calibration.
+COLOR_ID_MIN_FRACTION = 0.30        # winning colour's share of the ROI's pixels
+COLOR_ID_MARGIN_RATIO = 2.0         # ... and at least this many times the other colour's
+COLOR_ID_ROI_MARGIN_FACTOR = 1.5    # ROI = the pillar's projected box widened by this
+# OpenCV HSV (H 0-179, S and V 0-255). Red wraps around 0/180.
+COLOR_RED_HUE = ((0, 10), (170, 179))
+COLOR_GREEN_HUE = ((40, 85),)
+COLOR_MIN_SAT = 80
+COLOR_MIN_VAL = 50
+
 # --- Dashboard / server ---------------------------------------------------
 DASHBOARD_HOST = "0.0.0.0"
 DASHBOARD_PORT = 5056

@@ -17,6 +17,13 @@ stamped as lidar_source would stamp it (measurement + 2 ms +
 config.LIDAR_TIME_OFFSET_S), so the dashboard's de-skew runs exactly as on
 the robot.
 
+.camera get_latest_frame(), status()                     (like camera_source.Picamera2Source)
+get_latest_frame() renders a frame (camera_sim.render) from the true pose at
+the current simulated time, at most CAMERA_FPS per simulated second, stamped
+on the same clock as the STM32 samples. Each pillar gets a colour, RED or
+GREEN, from its own random stream (seed + 3000), so the world itself (pillar
+positions, the STM32 and LIDAR noise) is exactly as before checkpoint D.
+
 truth() gives what the real robot can't know (pillars, true pose) for the
 dashboard's faint truth overlay.
 """
@@ -35,6 +42,7 @@ import simulation as sim
 from stm32_link import ImuSample, LinkStats, parse_line
 
 IMU_LATENCY_S = 0.002
+CAMERA_FPS = 15.0
 
 
 class LiveSim:
@@ -45,6 +53,10 @@ class LiveSim:
         world_rng = random.Random(seed)
         self.path, self.start_section, self.s0, self.pillars, self.truth_seats = sim.make_world(
             direction, start_slot, y_start, world_rng)
+        color_rng = random.Random(seed + 3000)
+        for p in self.pillars:
+            p.color = color_rng.choice(["red", "green"])
+        self.truth_colors = _truth_colors(direction, self.pillars)
         self._stm = sim.SimStm32(random.Random(seed + 1000))
         self._scan_rng = random.Random(seed + 2000)
         self._lock = threading.Lock()
@@ -62,7 +74,7 @@ class LiveSim:
         self._track.append((0.0, self.s0))
         self._thread = threading.Thread(target=self._run, daemon=True, name="live_sim")
         self._thread.start()
-        self.link, self.lidar = _Link(self), _Lidar(self)
+        self.link, self.lidar, self.camera = _Link(self), _Lidar(self), _Camera(self)
 
     # -- control ---------------------------------------------------------------
     def now(self) -> float:
@@ -123,6 +135,7 @@ class LiveSim:
         return {"pose": (gx, gy, brg), "pillars": [(p.x_mm, p.y_mm) for p in self.pillars],
                 "start_section": self.start_section, "direction": self.direction,
                 "seats": {k: sorted(v) for k, v in self.truth_seats.items()},
+                "colors": {k: dict(v) for k, v in self.truth_colors.items()},
                 "slot_sections": [self.path.section(self.start_slot + k) for k in range(4)],
                 "driving": self.driving, "finished": self.finished}
 
@@ -186,3 +199,50 @@ class _Lidar:
 
     def timing_status(self) -> dict:
         return {"spin_hz": self._s.lidar_hz, "backwards_steps": 0, "last_return_age_s": 0.0}
+
+
+def _truth_colors(direction: str, pillars) -> dict:
+    """{section: {seat index: colour}} for the pillars (matched to seats by position)."""
+    import lane_frame as lf
+    import seat_occupancy as so
+    out: dict = {}
+    for sec in lf.SECTIONS:
+        for seat in so.seats():
+            gx, gy = lf.lane_to_global(sec, direction, seat.x_mm, seat.y_mm)
+            for p in pillars:
+                if math.hypot(p.x_mm - gx, p.y_mm - gy) < 1.0:
+                    out.setdefault(sec, {})[seat.index] = p.color
+    return out
+
+
+class _Camera:
+    """camera_source.Picamera2Source's consumer side: frames rendered from the true pose."""
+
+    def __init__(self, s: LiveSim):
+        self._s = s
+        self._latest = None
+        self._n = 0
+        self._rng = np.random.default_rng(s.seed + 4000)
+
+    def get_latest_frame(self):
+        import camera_sim
+        s = self._s
+        with s._lock:
+            t = s._t
+            if self._latest is not None and t - self._latest[1] + IMU_LATENCY_S < 1.0 / CAMERA_FPS:
+                return self._latest
+            track = list(s._track)
+        ts = [a for a, _ in track]
+        ss = [b for _, b in track]
+        gx, gy, brg = s.path.pose(float(np.interp(t, ts, ss)))
+        cx, cy = camera_sim.camera_global(gx, gy, brg)
+        frame = camera_sim.render(cx, cy, brg, s.pillars, self._rng)
+        self._n += 1
+        self._latest = (frame, t + IMU_LATENCY_S, self._n)
+        return self._latest
+
+    def status(self) -> dict:
+        return {"source": "simulated", "size": [config.CAMERA_WIDTH, config.CAMERA_HEIGHT],
+                "thread_alive": self._s._thread.is_alive(), "error": None, "frames": self._n,
+                "fps": CAMERA_FPS, "last_age_s": None, "stamp_fallbacks": 0, "simulated": True}
+
