@@ -134,6 +134,7 @@ def run_bench(a):
     link = _open_link(a)
     first = _take_latest(link)
     heading, last = 0.0, first
+    log_seen = link.status()["lines_log"]
     print(f"STM32 on {link.port}. Turn the robot CLOCKWISE by hand: heading must INCREASE. "
           f"Roll it a measured distance: distance must match. Ctrl-C to stop.")
     try:
@@ -142,6 +143,11 @@ def run_bench(a):
                 heading += config.IMU_YAW_SIGN * ((s.yaw_deg - last.yaw_deg + 180.0) % 360.0 - 180.0)
                 last = s
             st = link.status()
+            new_log = st["lines_log"] - log_seen            # firmware '#' / '!' lines (#52)
+            if new_log > 0:
+                for ln in st["recent_log"][-min(new_log, len(st["recent_log"])):]:
+                    print(f"\r  [fw] {ln}" + " " * 40)
+                log_seen = st["lines_log"]
             dist = (last.enc - first.enc) * 10.0 / config.ENCODER_TICKS_PER_CM
             print(f"\r  raw yaw {last.yaw_deg:8.2f}  heading {heading:+8.2f} deg (sign {config.IMU_YAW_SIGN:+d})   "
                   f"enc {last.enc:8d}  distance {dist:8.1f} mm ({config.ENCODER_TICKS_PER_CM} ticks/cm)   "

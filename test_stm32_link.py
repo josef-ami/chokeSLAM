@@ -93,9 +93,47 @@ def test_link_open_failure_is_reported():
     print(f"PASS  test_link_open_failure        reported, not silent: {st['error'][:70]}...")
 
 
+def test_firmware_log_lines_are_skipped():
+    """#52: the obstacle-round firmware prints '#' log lines and '!' tuning
+    replies on the same port (CRLF, from println). They are counted as log,
+    kept for display, and never counted as bad or parsed as samples."""
+    import tty
+    master, slave = os.openpty()
+    tty.setraw(slave)            # like pyserial: no CR -> LF translation, so CRLF arrives as sent
+    stream = open(os.ttyname(slave), "rb", buffering=0)
+    link = sl.Stm32Link(port=os.ttyname(slave), stream=stream)
+    link.start()
+    fw = ["# colour CH4 READY", "# zeroing yaw", "# zero yaw -12.34", "!V 6 97 1515847680",
+          "!P 0 TICKS_PER_CM 0 14.8530 1.0000 100.0000 0", "# ERROR IMU not found"]
+    out = fw[0] + "\r\n"                                   # a log line first after connecting
+    for i in range(1, 51):
+        out += f"$IMU,{i},{i * 10},{i * 3},{-0.5 * i:.2f}\n"
+        if i % 10 == 0:
+            out += fw[i // 10] + "\r\n"
+    out += "garbage\n"
+    payload = out.encode()
+    for k in range(0, len(payload), 41):
+        os.write(master, payload[k:k + 41])
+        time.sleep(0.001)
+    deadline, got = time.time() + 3.0, []
+    while time.time() < deadline and len(got) < 50:
+        got += link.drain()
+        time.sleep(0.01)
+    time.sleep(0.05)
+    st = link.status()
+    link.stop(); stream.close(); os.close(master); os.close(slave)
+    assert [s.seq for s in got] == list(range(1, 51)), [s.seq for s in got][:5]
+    assert st["lines_ok"] == 50 and st["lines_log"] == 6 and st["lines_bad"] == 1, st
+    assert st["recent_log"] == fw, st["recent_log"]
+    assert sl.is_log_line("  # x") and sl.is_log_line("!p 3 1.0") and not sl.is_log_line("$IMU,1,1,1,1")
+    print("PASS  test_firmware_log_lines        50 samples + 6 '#'/'!' lines (CRLF, one first after "
+          "connecting): log counted and kept, 0 samples lost, only the real garbage line is bad")
+
+
 if __name__ == "__main__":
     test_parse_line()
     test_line_assembler()
     test_link_over_pty()
     test_link_open_failure_is_reported()
+    test_firmware_log_lines_are_skipped()
     print("\nAll STM32 link checks passed.")

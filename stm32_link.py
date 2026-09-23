@@ -17,6 +17,12 @@ rate is ignored by CDC). Agreed format (decisions #13, #17, #18):
 
     e.g.   $IMU,1042,10420,15873,-12.37
 
+    Firmware log lines (decision #52): the obstacle-round firmware shares the
+    port and also prints lines starting with '#' (its log) or '!' (its tuning
+    replies). Those are not errors: they are counted as lines_log, the last
+    LOG_KEEP are kept for display, and they are never parsed as samples.
+    Anything else that isn't a valid $IMU line is still counted as bad.
+
 This module only turns bytes into validated ImuSample objects and keeps link
 statistics. What the samples MEAN (distance, heading, lane position) is
 lane_tracker.py's job.
@@ -39,6 +45,13 @@ import config
 
 PREFIX = "$IMU"
 N_FIELDS = 5            # $IMU, seq, t_ms, enc, yaw
+LOG_PREFIXES = ("#", "!")   # firmware log / tuning-reply lines (#52)
+LOG_KEEP = 20               # recent log lines kept for status()
+
+
+def is_log_line(line: str) -> bool:
+    """A firmware log ('#') or tuning-reply ('!') line: skipped, not bad."""
+    return line.strip().startswith(LOG_PREFIXES)
 
 
 @dataclass(frozen=True)
@@ -79,6 +92,8 @@ class LinkStats:
     last_bad_reason: str = ""
     seq_gaps: int = 0            # missing lines, counted from seq jumps
     seq_resets: int = 0          # seq went backwards (STM32 restarted?)
+    lines_log: int = 0           # '#' / '!' firmware lines skipped (#52)
+    recent_log: deque = field(default_factory=lambda: deque(maxlen=LOG_KEEP))
     last_sample: ImuSample | None = None
     rate_hz: float = 0.0         # measured over the last ~1 s of arrivals
     _arrivals: deque = field(default_factory=lambda: deque(maxlen=200))
@@ -180,6 +195,8 @@ class Stm32Link:
             "last_bad_reason": s.last_bad_reason,
             "seq_gaps": s.seq_gaps,
             "seq_resets": s.seq_resets,
+            "lines_log": s.lines_log,
+            "recent_log": list(s.recent_log),
             "rate_hz": round(s.rate_hz, 1),
             "last_age_s": age,
             "stale": age is None or age > config.IMU_STALE_S,
@@ -217,6 +234,11 @@ class Stm32Link:
                     now = time.monotonic()
                     if self._log_fh:
                         self._log_fh.write(line.rstrip("\r") + "\n")
+                    if is_log_line(line):
+                        first = False
+                        self.stats.lines_log += 1
+                        self.stats.recent_log.append(line.strip()[:120])
+                        continue
                     sample, why = parse_line(line)
                     if sample is None:
                         if first:            # a partial first line after connecting is expected

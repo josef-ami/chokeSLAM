@@ -147,6 +147,7 @@ class _Link:
         age = None if last is None else max(0.0, self._s.now() - last.rx_time)
         return {"port": self.port, "thread_alive": self.is_alive(), "error": None,
                 "lines_ok": st.lines_ok, "lines_bad": st.lines_bad, "last_bad_reason": st.last_bad_reason,
+                "lines_log": 0, "recent_log": [],
                 "seq_gaps": st.seq_gaps, "seq_resets": st.seq_resets,
                 "rate_hz": 100.0 if last is not None else 0.0,          # simulated clock
                 "last_age_s": None if age is None else round(age, 3),

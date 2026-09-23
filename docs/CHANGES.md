@@ -120,7 +120,14 @@ These are the owner's answers, numbered in the order they were asked.
 | 45 | Checkpoint C approval (§10.9 items 1–6) | **Approved, all items:** the display frame, the drawing, the panel, the runtime (Initialise / Re-initialise, loop order, stream, Save run), the tuning panel, mock mode |
 | 46 | P10 and P11 fixes (§10.7, §10.9 items 7–8) | **Approved, both:** frames judged at their end (late frames inside their window still count; frames the history doesn't fully cover are skipped), and the coverage check that turns an EMPTY with a hole in its window into UNKNOWN |
 
-All three checkpoints are approved: A (#34), B (#37, #39) and C (#45, #46). What is left is measuring and checking on the real robot (§11).
+| 47 | STM32 firmware scope | **Sensor bridge only:** stream `$IMU` at 100 Hz; motor held off, servo held straight |
+| 48 | STM32 toolchain | **Arduino IDE + STM32duino** |
+| 49 | Debug lines from the STM32 | **None:** only `$IMU` lines go over USB; status on LED1 only |
+| 50 | Portable stream snippet | `firmware/chokeslam_stream/chokeslam_stream.h`: protocol only, no hardware; the host sketch passes encoder, raw yaw, valid flag (§13) — **awaiting approval** |
+| 51 | Bridge status LED | **"rewrite the stm32 bridge sketch to show error over pc13":** the status blink moves from LED1 (PB12, not connected on the robot) to the Black Pill's on-board LED, PC13 (lit when LOW). Codes unchanged: fast 100 ms = IMU fault (not found at boot or no report for 100 ms), slow 500 ms = IMU fine but no line got out for 200 ms, solid = streaming. PB12–PB14 are held off. Constantly off after boot = firmware not running |
+| 52 | Pi side and the obstacle-round v7 firmware | **"Add a stream to this sketch"; chokeSLAM alone owns the port.** `firmware/obstacle_round_stream/` = the owner's v7 sketch + `chokeslam_stream.h` sending the unchanged `$IMU` line. The Pi now **skips `#` and `!` lines** (counted as firmware log, shown on the bench and dashboard) instead of counting them bad; this relaxes #49 on the Pi side (§14) — **awaiting approval** |
+
+All three checkpoints are approved: A (#34), B (#37, #39) and C (#45, #46). What is left is measuring and checking on the real robot (§11). The STM32 bridge firmware (`firmware/stm32_imu_bridge/`, decisions #47–#49) awaits approval: it could not be compiled here (the Arduino toolchain can't be downloaded in this sandbox), so its first build is on your machine. The portable snippet (#50, §13) also awaits approval. The bridge shows its status on the on-board LED PC13 (#51). The obstacle-round firmware with the stream added, and the Pi skipping its log lines (#52, §14), await approval.
 
 ## 4. Conventions
 
@@ -1402,3 +1409,69 @@ python3 measure_lidar_delay.py --real --record delay.json   # on the Pi (§9.11.
 python3 measure_lidar_delay.py --replay delay.json
 python3 measure_lidar_delay.py --sim --true-offset-ms 13
 ```
+
+## 13. Portable STM32 stream snippet (#50, awaiting approval)
+
+`firmware/chokeslam_stream/chokeslam_stream.h` is a single header that any STM32duino sketch can include to send the §9.1 protocol line. It does nothing else. It touches no pins, timers, SPI, encoder or IMU hardware. `example_usage.ino` next to it shows the three lines a sketch adds.
+
+### 13.1 Interface
+- `chokeslamStreamPoll(int32_t encoderCount, float yawDeg, bool yawValid)`: call it on every loop pass. It returns true when a line went out.
+  - `encoderCount`: cumulative since power-on, forward is +, never reset.
+  - `yawDeg`: the raw Game Rotation Vector yaw. No offset, no sign flip, no unwrap. The Pi applies `IMU_YAW_SIGN`.
+  - `yawValid`: true only while the yaw is a real, recent reading. The bridge firmware uses "a report within 100 ms".
+- `chokeslamFormatLine(...)` builds one line. It is exposed for testing or reuse.
+- `chokeslamStreamHostOk(withinMs = 200)` is optional, for a status LED. It is true if a line went out recently.
+- The port defaults to `Serial`. Override it with `#define CHOKESLAM_PORT ...` before the include. The period defaults to 10 ms and can be changed with `CHOKESLAM_PERIOD_MS`.
+
+### 13.2 Mechanisms (identical to the bridge, #47)
+- **Pacing:** the header keeps its own 10 ms schedule on `millis()`. After a stall longer than one period it resyncs rather than sending a burst of catch-up lines.
+- **Validity:** when a line is due but `yawValid` is false or the yaw is not finite, nothing is sent and no seq is used. The Pi then sees the link go STALE rather than integrating a frozen heading.
+- **seq:** increments once per due, valid line. If USB has no room (`availableForWrite() < n`), the line is dropped but its seq stays used, so the Pi counts it as lost. The send never blocks.
+- **t_ms:** `HAL_GetTick()` at the moment the line is built. The host's values are taken as current at that call, so pass freshly read values.
+- **Formatting:** integer-only `snprintf` with a sign and `%lu.%02lu`, because nano libc has no printf-float. The yaw is rounded to 0.01°, and −0.004 prints as `0.00`.
+
+### 13.3 Rules for the host sketch
+- Nothing else may be written to the stream port: no debug prints and no `#` lines (#49). The Pi counts any non-`$IMU` line as bad. A sketch that prints debug to `Serial` or reads a LIDAR on `Serial` must move that traffic to another port, or the stream must be moved with `CHOKESLAM_PORT`.
+- USB support must be "CDC (generic 'Serial' supersede U(S)ART)".
+
+### 13.4 Verification done here
+The header was compiled on the host (g++, C++17) against a stub `Arduino.h` and driven through 200 simulated ms:
+- The yaws −52.07, −0.05, 0.00, 179.99, −180.00 and 12.345 printed as `12.35`.
+- A 30 ms invalid-yaw gap produced no lines and no seq.
+- A 10 ms "USB busy" window dropped seq 13.
+- A 4.8 s stall resumed with one line, with no burst.
+
+All 18 lines were accepted by `stm32_link.parse_line`. It has not been built with the STM32duino toolchain, which can't be downloaded here.
+
+## 14. The obstacle-round v7 firmware as the STM32 side (#52, awaiting approval)
+
+The owner asked to "switch the pi side to use the data format from this sketch" (the v7 obstacle-round firmware). That sketch sends the Pi no yaw and no encoder counts. The only data format it has runs Pi → STM32: the 18-field frame. So the Pi had nothing to switch to. The owner chose to **add the stream to the sketch**, with **chokeSLAM alone** holding `/dev/ttyACM0` (obstacleRound.py does not run at the same time).
+
+### 14.1 Firmware (`firmware/obstacle_round_stream/obstacle_round_stream.ino`)
+The owner's v7 sketch, unchanged except for these additions (40 diff lines):
+- `#include "chokeslam_stream.h"`, a copy of the §13 header placed next to the sketch.
+- **Encoder that never resets.** v7 zeroes TIM5 at START and at the end of every turn (`zeroEncoder()`), but the protocol needs a count that never resets. `zeroEncoder()` now adds the current count to `streamEncBase` before clearing TIM5, and the stream sends `streamEncBase + readEncoder()`. v7's own `readEncoder()` still returns the count since its last zero, so its driving logic is unchanged. Ticks arriving between the read and the clear, a few µs, are lost. That is negligible.
+- **Raw yaw.** Each Game Rotation Vector event that `serviceSensors()` takes also stores `readYaw()` in `streamYawRaw`, with the time. `readYaw()` is the quaternion yaw before v7's `initialYawOffset` and `IMU_YAW_SIGN`, which is what the protocol requires. An all-zero quaternion is ignored.
+- **Valid** means an event arrived within `STREAM_IMU_STALE_MS` (100 ms). Without one, no lines are sent and the Pi sees STALE.
+- `chokeslamStreamPoll(...)` is called at the top of `loop()`, right after `serviceSensors()`. That is before v7's "wait for the Pi's first frame" gate, so the stream runs from boot.
+- **Unchanged:** all of v7's `#` log lines and `!` tuning replies. Every one of them starts with `#` or `!`, which was checked by listing what each output line starts with. `println` ends them with CRLF.
+
+### 14.2 Pi (`stm32_link.py`)
+- Lines starting with `#` or `!` (after whitespace) are **firmware log**. They are counted in `lines_log`, the last 20 are kept in `recent_log`, and they are never parsed and never counted as bad. Anything else that isn't a valid `$IMU` line is still bad.
+- `status()` gains `lines_log` and `recent_log`. The 3 s "no STM32 samples" message therefore also shows the firmware's last lines, such as `# ERROR IMU not found`.
+- `run_track.py --bench` prints each new firmware line above the status line as `[fw] ...`.
+- The dashboard's STM32 panel shows "firmware log lines" and the last 5.
+- `--log` files still record every line, including log lines. Replay (`read_log`) skips anything that isn't a sample.
+- The format and meaning of the `$IMU` line are unchanged: `IMU_YAW_SIGN = −1` and `ENCODER_TICKS_PER_CM = 14.853`, the same as v7's `TICKS_PER_CM`.
+
+### 14.3 Consequences to know
+- **The car will not drive under this firmware with chokeSLAM alone.** v7's state machine waits for the Pi's first 18-field frame (the startup gate), and chokeSLAM never writes to the port. The robot must be pushed by hand, as with the bridge. The on-board LED shows v7's slow "waiting for Pi" blink.
+- v7's multi-part log lines (such as `# pillar RED lat=..`) are written within one `loop()` pass, and the stream writes only at the top of `loop()`. A `$IMU` line therefore never lands inside one of them.
+- v7's `Serial.print` calls are not guarded against a full USB buffer, so they may wait while the Pi isn't reading. That behaviour is v7's and was not changed.
+- **Open question, not changed:** the header checks `if (Serial)` before writing. On STM32duino that check is believed to include a 10 ms delay. This could not be confirmed here because the core's source can't be reached. In a driving loop that would slow the control loop, so removing the check is proposed for approval.
+
+### 14.4 Verification here
+- `test_stm32_link.test_firmware_log_lines_are_skipped` runs through a raw pty in 41-byte chunks: 50 `$IMU` lines, 6 real v7 lines with CRLF (one of them first after connecting), and 1 garbage line. Result: 50 samples in order, 6 log lines kept verbatim, and exactly 1 bad line.
+- All 13 suites pass.
+- The firmware file was not compiled, because the STM32duino toolchain can't be downloaded here. The stream header itself was host-tested (§13.4).
+

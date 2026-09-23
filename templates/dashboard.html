@@ -286,8 +286,10 @@ function renderPanel() {
     ['port', esc(m.port)], ['link', m.error ? `<span class="bad">${esc(m.error)}</span>` : (m.stale ? '<span class="bad">STALE</span>' : '<span class="ok">OK</span>')],
     ['rate', fmt(m.rate_hz, ' Hz')], ['last line', fmt(m.last_age_s, ' s ago')],
     ['lines ok / bad', `${fmt(m.lines_ok)} / ${fmt(m.lines_bad)}`], ['lost (seq gaps)', fmt(m.seq_gaps)], ['STM32 restarts', fmt(m.seq_resets)],
+    ['firmware log lines', fmt(m.lines_log)],
     ['raw yaw / enc', m.last ? `${m.last.yaw_deg}° / ${m.last.enc}` : '–'],
     ['heading / distance', m.heading_deg !== undefined ? `${m.heading_deg}° / ${(m.distance_mm / 1000).toFixed(2)} m` : '–'],
+    ...((m.recent_log || []).length ? [['firmware log', `<span class="muted small">${m.recent_log.slice(-5).map(esc).join('<br>')}</span>`]] : []),
     ...(m.last_bad_reason ? [['last bad line', `<span class="muted small">${esc(m.last_bad_reason)}</span>`]] : []),
   ]);
   const L = S.lidar || {};
