@@ -1,4 +1,4 @@
-> **Note (September 2026):** this README describes the design as it was *before* the changes recorded in [docs/CHANGES.md](docs/CHANGES.md): clockwise angles, lane-only initialisation, the CW/CCW gap test, and (in progress) IMU tracking and the lane dashboard. Files it mentions such as `localization.py` and `scan_prediction.py` have been deleted. Where the two disagree, docs/CHANGES.md is current.
+> **Note (September 2026):** this README describes the design as it was *before* the changes recorded in [docs/CHANGES.md](docs/CHANGES.md): clockwise angles, lane-only initialisation, the CW/CCW gap test, IMU tracking with the de-skewed entry re-check, and the lane-by-lane dashboard. Files it mentions such as `localization.py` and `scan_prediction.py` have been deleted. Where the two disagree, docs/CHANGES.md is current.
 
 # WRO Obstacle Challenge broadside localization + dashboard
 

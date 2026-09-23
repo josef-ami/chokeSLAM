@@ -28,6 +28,9 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from collections import deque
+
+from timing import SweepClock
 
 
 class RPLidarC1Source:
@@ -36,7 +39,13 @@ class RPLidarC1Source:
         self.baudrate = baudrate
         self.timeout = timeout
         self._bucket = angle_bucket_deg
-        self._table: dict[int, tuple[float, float, int]] = {}   # bucket -> (angle_deg, dist_mm, quality)
+        # bucket -> (angle_deg, dist_mm, quality, theta, arrival): theta is the
+        # angle unwrapped across revolutions (timing.SweepClock), arrival the
+        # Pi's time.monotonic() when the return was taken off the queue.
+        self._table: dict[int, tuple[float, float, int, float, float]] = {}
+        self._clock = SweepClock()
+        # every return of the last ~4 s, for recordings (measure_lidar_delay.py)
+        self._recent: deque = deque(maxlen=20000)
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop_flag = threading.Event()
@@ -95,8 +104,35 @@ class RPLidarC1Source:
                 pass
 
     def get_latest_scan(self) -> list[tuple[float, float, int]]:
+        """The latest return in each angle bucket: (raw angle, dist, quality)."""
         with self._lock:
-            return list(self._table.values())
+            return [(a, d, q) for a, d, q, _, _ in self._table.values()]
+
+    def get_latest_scan_timed(self) -> list[tuple[float, float, int, float]]:
+        """As get_latest_scan, plus each return's measurement time on the Pi's
+        time.monotonic() clock, from the sweep (timing.SweepClock): (raw angle,
+        dist, quality, t). Until the clock has about one revolution of data the
+        arrival time is used instead. Used by the entry re-check's de-skew."""
+        with self._lock:
+            fit = self._clock.fit()
+            if fit is None:
+                return [(a, d, q, arr) for a, d, q, _, arr in self._table.values()]
+            return [(a, d, q, SweepClock.time_of(th, fit)) for a, d, q, th, _ in self._table.values()]
+
+    def get_points_since(self, t: float) -> list[tuple[float, float, int, float, float]]:
+        """Every return that arrived after Pi time t (at most the last ~4 s):
+        (raw angle, dist, quality, theta, arrival). For recordings."""
+        with self._lock:
+            return [p for p in self._recent if p[4] > t]
+
+    def timing_status(self) -> dict:
+        """Sweep clock health: spin rate (None until about one revolution has
+        arrived), how often the raw angle stepped backwards (should stay ~0),
+        and seconds since the last return arrived (None before the first)."""
+        with self._lock:
+            last = self._recent[-1][4] if self._recent else None
+            return {"spin_hz": self._clock.spin_hz(), "backwards_steps": self._clock.backwards,
+                    "last_return_age_s": None if last is None else time.monotonic() - last}
 
     # -- internals -----------------------------------------------------
     def _thread_main(self):
@@ -159,7 +195,10 @@ class RPLidarC1Source:
                 continue
             quality = int(item.get("q", 0))
             bucket = int(angle / self._bucket)
+            arrival = time.monotonic()
             with self._lock:
-                self._table[bucket] = (angle, dist, quality)
+                theta = self._clock.add(angle, arrival)
+                self._table[bucket] = (angle, dist, quality, theta, arrival)
+                self._recent.append((angle, dist, quality, theta, arrival))
                 self._points_received_total += 1
         self._lidar.stop_event.set()

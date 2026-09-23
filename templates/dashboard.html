@@ -2,877 +2,367 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>WRO Localization Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chokeSLAM lanes</title>
 <style>
   :root {
-    --bg: #0f1420; --panel: #161d2e; --ink: #e7ecf5; --muted: #8993a8;
-    --lane: #1c2740; --island: #232e46; --wall: #4c5b7a;
-    --ok: #3ecf8e; --bad: #e5556b; --wallpt: #5aa9ff; --pillarpt: #ffb454; --unpt: #556077;
-    --candidate: #ffd166;
+    --bg: #0e131d; --panel: #151c29; --panel2: #1b2433; --ink: #e6ebf4; --muted: #8b95a8; --line: #2a3446;
+    --wall: #c9d2e3; --lane: #1a2536; --lane-cur: #1f2d44;
+    --present: #f0a33a; --absent: #3fbf7f; --unknown: #7d879a;
+    --path: #43c6db; --live: #f4f06a; --init: #b48cff; --truth: #ff6b8a; --robot: #ffffff;
+    --bad: #ff6b6b; --ok: #3fbf7f; --warn: #f0a33a;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
-  #layout { display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
-  #matWrap { background: var(--panel); border-radius: 12px; padding: 12px; }
-  canvas { display: block; border-radius: 8px; background: #0b0f18; }
-  #panel { background: var(--panel); border-radius: 12px; padding: 16px; min-width: 280px; flex: 1; }
-  h1 { font-size: 16px; margin: 0 0 12px; color: var(--muted); font-weight: 600; letter-spacing: .02em; }
-  .row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #232c40; font-size: 13px; }
-  .row span:first-child { color: var(--muted); }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-  .badge.ok { background: rgba(62,207,142,.15); color: var(--ok); }
-  .badge.bad { background: rgba(229,85,107,.15); color: var(--bad); }
-  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--muted); }
-  .legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
-  #reason { font-size: 12px; color: var(--muted); margin-top: 6px; word-break: break-word; }
-  .muted-note { font-size: 12px; color: var(--muted); padding: 6px 0; }
-  .cand-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; border-bottom: 1px solid #232c40; }
-  .cand-sw { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; }
-  .cand-tag { width: 26px; font-weight: 700; color: var(--ink); }
-  .cand-xy { flex: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
-  .cand-hd { color: var(--muted); font-variant-numeric: tabular-nums; }
-  .cand-hd em { font-style: normal; opacity: .7; font-size: 11px; }
-  #tuningWrap { margin-top: 18px; }
-  #tuningWrap > summary { cursor: pointer; font-size: 16px; color: var(--muted); font-weight: 600; letter-spacing: .02em; list-style: none; }
-  #tuningWrap > summary::-webkit-details-marker { display: none; }
-  #tuningWrap > summary::before { content: '\25B8  '; }
-  #tuningWrap[open] > summary::before { content: '\25BE  '; }
-  .tgroup { margin-top: 12px; }
-  .tgroup-h { font-size: 12px; font-weight: 700; color: var(--ink); text-transform: uppercase; letter-spacing: .03em; }
-  .tgroup-note { font-size: 11px; color: var(--muted); margin: 2px 0 6px; }
-  .tparam { padding: 5px 0; border-bottom: 1px solid #232c40; }
-  .tparam-top { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; align-items: baseline; }
-  .tparam-name { color: var(--ink); font-family: ui-monospace, Menlo, Consolas, monospace; }
-  .tparam-name.crit { color: var(--bad); }
-  .tparam-val { color: var(--ok); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .tparam-imp { font-size: 11px; color: var(--muted); margin-top: 2px; }
-  .crit-badge { display: inline-block; font-size: 9px; font-weight: 700; color: var(--bad); border: 1px solid var(--bad); border-radius: 3px; padding: 0 3px; margin-left: 6px; vertical-align: middle; }
-  .tedit { width: 96px; background: #0b0f18; color: var(--ink); border: 1px solid #2e3a55; border-radius: 5px; padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
-  select.tedit { text-align: left; width: 108px; }
-  .tedit:focus { outline: none; border-color: var(--wallpt); }
-  .tedit.okflash { border-color: var(--ok); box-shadow: 0 0 0 2px rgba(62,207,142,.25); }
-  .tedit.badflash { border-color: var(--bad); box-shadow: 0 0 0 2px rgba(229,85,107,.3); }
-  .tedit-chk { width: 16px; height: 16px; accent-color: var(--wallpt); }
-  .tcontrols { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0 2px; }
-  .tbtn { background: #1c2740; color: var(--ink); border: 1px solid #2e3a55; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; }
-  .tbtn:hover { border-color: var(--wallpt); }
-  .tbtn.primary { background: rgba(90,169,255,.15); border-color: var(--wallpt); color: var(--wallpt); }
-  #tstatus { font-size: 11px; color: var(--muted); margin-left: auto; }
-
-  /* --- view tabs ------------------------------------------------------- */
-  .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
-  .tab { background: #111826; color: var(--muted); border: 1px solid #2e3a55; border-radius: 7px;
-         padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; letter-spacing: .02em; }
-  .tab:hover { border-color: var(--wallpt); }
-  .tab.active { background: rgba(90,169,255,.15); border-color: var(--wallpt); color: var(--wallpt); }
-  .view { display: none; }
-  .view.active { display: block; }
-
-  /* --- seat occupancy -------------------------------------------------- */
-  .seat-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
-  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .03em; }
-  .pill.occ { background: rgba(229,85,107,.18); color: var(--bad); }
-  .pill.emp { background: rgba(62,207,142,.15); color: var(--ok); }
-  .pill.unk { background: rgba(255,180,84,.15); color: var(--pillarpt); }
-  .pill.info { background: #1c2740; color: var(--muted); }
-  table.seats { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
-  table.seats th { text-align: right; color: var(--muted); font-weight: 600; font-size: 11px;
-                   padding: 4px 5px; border-bottom: 1px solid #2e3a55; white-space: nowrap; }
-  table.seats th:first-child, table.seats td:first-child { text-align: left; }
-  table.seats td { padding: 4px 5px; border-bottom: 1px solid #232c40; text-align: right; white-space: nowrap; }
-  table.seats tr.occ td:first-child { color: var(--bad); font-weight: 600; }
-  table.seats tr.emp td:first-child { color: var(--ok); }
-  table.seats tr.unk td:first-child { color: var(--pillarpt); }
-  table.seats tr.mismatch { background: rgba(229,85,107,.10); }
-  .seat-reason { font-size: 11px; color: var(--muted); padding: 2px 5px 7px; border-bottom: 1px solid #232c40; }
-  .warnbox { background: rgba(255,180,84,.08); border: 1px solid rgba(255,180,84,.35); border-radius: 8px;
-             padding: 9px 11px; margin-bottom: 10px; font-size: 11.5px; color: #e8c88f; }
-  .warnbox b { color: var(--pillarpt); display: block; margin-bottom: 4px; font-size: 11px; letter-spacing: .03em; }
-  .warnbox ul { margin: 4px 0 0; padding-left: 16px; }
-  .warnbox li { margin: 1px 0; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+  .badge.real { background: #26406b; } .badge.mock { background: #5b3a6b; }
+  #message { color: var(--muted); flex: 1; min-width: 200px; }
+  #error { color: var(--bad); }
+  main { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
+  #left { flex: 1 1 560px; min-width: 300px; max-width: 900px; }
+  #canvasWrap { background: var(--panel); border-radius: 12px; padding: 10px; position: relative; }
+  canvas { width: 100%; height: auto; display: block; }
+  #tip { position: absolute; pointer-events: none; background: #000d; border: 1px solid var(--line); border-radius: 6px;
+         padding: 6px 8px; font-size: 12px; max-width: 320px; display: none; }
+  #legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+  #legend label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+  #right { flex: 1 1 420px; min-width: 300px; display: flex; flex-direction: column; gap: 12px; }
+  .card { background: var(--panel); border-radius: 12px; padding: 12px 14px; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; font-weight: 600; color: #cfd7e6; display: flex; justify-content: space-between; align-items: center; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  .st-occupied { color: var(--present); font-weight: 600; } .st-empty { color: var(--absent); } .st-unknown { color: var(--unknown); }
+  button { background: #2b5fd9; color: #fff; border: 0; border-radius: 8px; padding: 7px 14px; font-weight: 600; cursor: pointer; }
+  button.secondary { background: var(--panel2); color: var(--ink); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  select, input { background: var(--panel2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: inherit; }
+  input[type=number] { width: 90px; }
+  .muted { color: var(--muted); } .small { font-size: 11px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .chips { display: flex; gap: 4px; flex-wrap: wrap; }
+  .chip { border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 11px; }
+  #events { max-height: 220px; overflow: auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+  #events div { padding: 2px 0; border-bottom: 1px solid var(--line); }
+  details { border-top: 1px solid var(--line); padding: 6px 0; }
+  details summary { cursor: pointer; font-weight: 600; }
+  .param { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+  .param .name { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  .param .changed { color: var(--warn); }
+  .param .meaning { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
+  .param .err { grid-column: 1 / -1; color: var(--bad); font-size: 11px; }
+  .tag { font-size: 10px; border-radius: 6px; padding: 0 5px; margin-left: 6px; background: var(--panel2); color: var(--muted); }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; background: var(--panel2); padding: 1px 4px; border-radius: 4px; word-break: break-all; }
 </style>
 </head>
 <body>
-<div id="layout">
-  <div id="matWrap">
-    <div class="tabs">
-      <button class="tab active" data-view="mat">MAT VIEW</button>
-      <button class="tab" data-view="lane">LANE VIEW &mdash; SEAT OCCUPANCY</button>
+<header>
+  <h1>chokeSLAM</h1>
+  <span id="modeBadge" class="badge">…</span>
+  <span id="message">connecting…</span>
+  <span id="error"></span>
+</header>
+<main>
+  <section id="left">
+    <div id="canvasWrap">
+      <canvas id="loop" width="900" height="900"></canvas>
+      <div id="tip"></div>
     </div>
-    <div class="view active" data-view="mat"><canvas id="mat" width="760" height="760"></canvas></div>
-    <div class="view" data-view="lane"><canvas id="lane" width="760" height="760"></canvas></div>
-  </div>
-  <div id="panel">
-    <div id="warnBox"></div>
-    <h1>ESTIMATED POSE</h1>
-    <div class="row"><span>mode</span><span id="mode">-</span></div>
-    <div class="row"><span>section</span><span id="section">-</span></div>
-    <div class="row"><span>x, y (mm)</span><span id="xy">-</span></div>
-    <div class="row"><span>heading (grid bearing)</span><span id="heading">-</span></div>
-    <div class="row"><span>lateral from outer (mm)</span><span id="lateral">-</span></div>
-    <div class="row"><span>along section (mm)</span><span id="along">-</span></div>
+    <div id="legend">
+      <span><span class="sw" style="background:var(--present)"></span> present</span>
+      <span><span class="sw" style="border:2px solid var(--absent)"></span> absent</span>
+      <span><span class="sw" style="border:2px dashed var(--unknown)"></span> unknown</span>
+      <span>■ from initialisation · ◆ from the entry re-check</span>
+      <label><input type="checkbox" id="showLive" checked> <span class="sw" style="background:var(--live)"></span> live scan</label>
+      <label><input type="checkbox" id="showInit" checked> <span class="sw" style="background:var(--init)"></span> init scan</label>
+      <label><input type="checkbox" id="showPath" checked> <span class="sw" style="background:var(--path)"></span> IMU path</label>
+      <label id="truthToggle" style="display:none"><input type="checkbox" id="showTruth" checked> <span class="sw" style="background:var(--truth)"></span> truth (mock)</label>
+    </div>
+  </section>
 
-    <div id="seatBlock" style="display:none">
-      <h1 style="margin-top:18px">SEAT OCCUPANCY &mdash; CURRENT SECTION</h1>
-      <div class="seat-head" id="seatHead"></div>
-      <div class="row"><span>lane pose (x from left wall, y along travel)</span><span id="lanePose">-</span></div>
-      <div class="row"><span>yaw vs grid north</span><span id="laneYaw">-</span></div>
-      <div class="row"><span>grid north / outer wall</span><span id="laneNorth">-</span></div>
-      <table class="seats" id="seatTable"></table>
-      <div class="tcontrols" style="margin-top:10px">
-        <button class="tbtn" id="btnSeatReset">Forget held verdicts</button>
-        <span class="muted-note" style="padding:0">held verdicts are cleared automatically at every corner</span>
+  <section id="right">
+    <div class="card">
+      <h2>Controls</h2>
+      <div class="row">
+        <button id="initBtn">Initialise</button>
+        <button id="saveBtn" class="secondary">Save run</button>
+        <span class="muted small">Initialise with the robot standing still at its start. Pressing it again starts over from lane 1.</span>
       </div>
-      <div class="legend">
-        <div><span class="dot" style="background:var(--bad)"></span>occupied</div>
-        <div><span class="dot" style="background:var(--ok)"></span>empty (ray reached past the seat)</div>
-        <div><span class="dot" style="background:var(--pillarpt)"></span>unknown (occluded, blind wedge, or no return) &mdash; never treat as clear</div>
+      <div id="mockCtl" class="row" style="display:none; margin-top:10px">
+        <span class="muted">Mock:</span>
+        <label>direction <select id="mDir"><option>CCW</option><option>CW</option></select></label>
+        <label>start section <select id="mSec"><option>S</option><option>E</option><option>N</option><option>W</option></select></label>
+        <label>seed <input id="mSeed" type="number" value="1"></label>
+        <label>speed <input id="mSpeed" type="number" value="600" step="50"> mm/s</label>
+        <label>time <select id="mScale"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+        <span class="muted small">applies at the next Initialise</span>
       </div>
-      <div class="muted-note">
-        <b>state</b> is the held verdict your planner should use; <b>live</b> is this scan alone.
-        <b>exp</b> is the range the pillar&rsquo;s near face would be at; <b>obs</b> is what came back
-        in the search window around the predicted bearing.
-      </div>
+      <div id="saveResult" class="small" style="margin-top:8px"></div>
     </div>
 
-    <div id="matBlock">
-    <h1 style="margin-top:18px">LAST BROADSIDE FIX</h1>
-    <div class="row"><span>status</span><span id="fixStatus">-</span></div>
-    <div class="row"><span>front (measured) / back (inferred)</span><span id="frontBack">-</span></div>
-    <div id="reason"></div>
-
-    <h1 style="margin-top:18px">START-OF-RUN FIX (one-time)</h1>
-    <div class="row"><span>status</span><span id="startFixStatus">-</span></div>
-    <div class="row"><span>left / right walls (mm)</span><span id="startLeftRight">-</span></div>
-    <div class="row"><span>lane sum (expect ~1000)</span><span id="startLaneSum">-</span></div>
-    <div class="row"><span>forward 0&deg; (mm)</span><span id="startForward">-</span></div>
-    <div class="row"><span>lateral (from outer) / along</span><span id="startLatAlong">-</span></div>
-    <div id="startReason"></div>
-
-    <h1 style="margin-top:18px">START CANDIDATES (4 legs &times; 2 axes)</h1>
-    <div id="candList"><div class="muted-note">No candidates &mdash; the start-of-run fix hasn&rsquo;t succeeded yet (needs a broadside placement).</div></div>
-
-    <div class="legend">
-      <div><span class="dot" style="background:var(--wallpt)"></span>wall points</div>
-      <div><span class="dot" style="background:var(--pillarpt)"></span>pillar points</div>
-      <div><span class="dot" style="background:var(--unpt)"></span>unclassified</div>
-      <div><span style="display:inline-block;width:9px;height:9px;border:1px dashed #3a4666;margin-right:5px;vertical-align:middle"></span>mat_geometry slot table</div>
-      <div><span style="display:inline-block;width:9px;height:9px;border:1px solid #6f7fa8;margin-right:5px;vertical-align:middle"></span>rulebook Fig. 11 seats (what the detector uses) &mdash; the two disagree on all 24</div>
-      <div><span class="dot" style="background:var(--candidate)"></span>start candidates: each leg has a colour; arrow + matching dots = its predicted LIDAR (solid=driving heading, dashed=+90&deg;)</div>
+    <div class="card"><h2>Tracker</h2><div id="tracker" class="kv"></div></div>
+    <div class="card"><h2>Lanes</h2><div id="lanes"></div></div>
+    <div class="card"><h2>Initialisation</h2><div id="init" class="muted">not initialised</div></div>
+    <div class="card"><h2>STM32 (IMU + encoder)</h2><div id="imu" class="kv"></div></div>
+    <div class="card"><h2>LIDAR</h2><div id="lidar" class="kv"></div></div>
+    <div class="card"><h2>Events</h2><div id="events"></div></div>
+    <div class="card">
+      <h2>Tuning <button id="resetBtn" class="secondary">Reset to config.py</button></h2>
+      <div class="muted small">Edits apply in memory only (copy a value into config.py to keep it). Each value says when it takes effect.</div>
+      <div id="tuning"></div>
     </div>
-    </div>
-
-    <details id="tuningWrap">
-      <summary>TUNING PARAMETERS</summary>
-      <div id="tuningBody"></div>
-    </details>
-  </div>
-</div>
+  </section>
+</main>
 
 <script>
-const canvas = document.getElementById('mat');
-const ctx = canvas.getContext('2d');
-let field = null;
-const MARGIN = 24;
+const OUTER = 3000;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = (v, u = '') => (v === null || v === undefined) ? '–' : `${v}${u}`;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const ORDER = { CCW: ['S', 'E', 'N', 'W'], CW: ['S', 'W', 'N', 'E'] };
 
-function toCanvas(x_mm, y_mm) {
-  const size = field.outer_size_mm;
-  const scale = (canvas.width - 2 * MARGIN) / size;
-  return [MARGIN + x_mm * scale, canvas.height - MARGIN - y_mm * scale, scale];
-}
+let S = null, STATIC = { init_id: -1, init_scan: [], truth_pillars: [] }, seatHits = [];
+const cv = $('loop'), ctx = cv.getContext('2d');
+const M = 30;
+const sc = () => (cv.width - 2 * M) / OUTER;
+const px = (X, Y) => [M + X * sc(), M + (OUTER - Y) * sc()];
 
-function drawField() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const [ox, oy, scale] = toCanvas(0, 0);
-  const size = field.outer_size_mm * scale;
+function draw() {
+  const W = cv.width;
+  ctx.clearRect(0, 0, W, W);
+  ctx.fillStyle = css('--panel'); ctx.fillRect(0, 0, W, W);
+  // the fixed frame
+  ctx.setLineDash([4, 6]); ctx.strokeStyle = css('--line'); ctx.lineWidth = 1;
+  const [fx, fy] = px(0, OUTER); ctx.strokeRect(fx, fy, OUTER * sc(), OUTER * sc()); ctx.setLineDash([]);
+  ctx.fillStyle = css('--muted'); ctx.font = '11px system-ui'; ctx.fillText('fixed full-loop frame, 3000 × 3000 mm', M, M - 10);
+  seatHits = [];
+  if (!S) return;
+  const showTruth = S.mode === 'mock' && S.tracking && $('showTruth').checked;   // truth is in the loop frame: only once initialised
 
-  // lane background
-  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--lane');
-  ctx.fillRect(ox, oy - size, size, size);
-
-  // outer wall
-  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--wall');
-  ctx.lineWidth = 3;
-  ctx.strokeRect(ox, oy - size, size, size);
-
-  // island
-  const [ix, iy] = toCanvas(field.island_min_mm, field.island_max_mm);
-  const islandSize = (field.island_max_mm - field.island_min_mm) * scale;
-  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--island');
-  ctx.fillRect(ix, iy, islandSize, islandSize);
-  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--wall');
-  ctx.lineWidth = 2;
-  ctx.strokeRect(ix, iy, islandSize, islandSize);
-
-  // 24 placeholder slots, TWO tables drawn deliberately:
-  //  - faint dashed: mat_geometry.all_slots(), the repo's existing table
-  //  - solid: the rulebook Figure 11 positions the seat detector actually uses
-  // They disagree on all 24 (Finding 1). Drawing both keeps that visible
-  // instead of leaving the pillars looking mysteriously off their markers.
-  ctx.save();
-  ctx.strokeStyle = '#3a4666';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([2, 2]);
-  const slotPx = 14;
-  for (const s of field.slots) {
-    const [sx, sy] = toCanvas(s.x_mm, s.y_mm);
-    ctx.strokeRect(sx - slotPx / 2, sy - slotPx / 2, slotPx, slotPx);
+  if (!S.tracking) {
+    ctx.fillStyle = css('--muted'); ctx.font = '13px system-ui';
+    ctx.fillText('Not initialised: live scan around the robot (robot at the centre, facing up)', M + 8, M + 22);
   }
-  ctx.restore();
-
-  ctx.save();
-  ctx.strokeStyle = '#6f7fa8';
-  ctx.lineWidth = 1.2;
-  const seatPx = Math.max(5, 50 * scale);
-  for (const s of field.rulebook_slots_global || []) {
-    const [sx, sy] = toCanvas(s.x_mm, s.y_mm);
-    ctx.strokeRect(sx - seatPx / 2, sy - seatPx / 2, seatPx, seatPx);
+  // lanes: all fills first (neighbouring lanes share their corner squares), then walls and labels
+  for (const lane of (S.lanes || [])) {
+    const cur = S.tracker && lane.slot === S.tracker.slot;
+    ctx.fillStyle = css(cur ? '--lane-cur' : '--lane');
+    ctx.beginPath(); lane.outline.strip.forEach(([X, Y], i) => { const [a, b] = px(X, Y); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); });
+    ctx.closePath(); ctx.fill();
   }
-  ctx.restore();
-}
-
-function drawPillars(pillars) {
-  for (const p of pillars || []) {
-    const [px, py] = toCanvas(p.x_mm, p.y_mm);
-    ctx.fillStyle = p.color === 'red' ? '#e5556b' : '#3ecf8e';
-    ctx.beginPath();
-    ctx.arc(px, py, 6, 0, Math.PI * 2);
-    ctx.fill();
+  for (const lane of (S.lanes || [])) {
+    ctx.strokeStyle = css('--wall'); ctx.lineWidth = 3;
+    for (const k of ['outer', 'island']) {
+      const [[x1, y1], [x2, y2]] = lane.outline[k];
+      const [a, b] = px(x1, y1), [c, d] = px(x2, y2);
+      ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c, d); ctx.stroke();
+    }
+    // label between the inner seats and the island wall
+    const [lx, ly] = px(lane.label[0], lane.label[1]);
+    ctx.fillStyle = css('--muted'); ctx.font = '12px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(`lane ${lane.lane_number}`, lx, ly); ctx.textAlign = 'left';
   }
-}
-
-function drawPoints(points) {
-  for (const p of points) {
-    const [px, py] = toCanvas(p.x, p.y);
-    ctx.fillStyle = p.kind === 'wall' ? '#5aa9ff' : (p.kind === 'pillar' ? '#ffb454' : '#556077');
-    ctx.beginPath();
-    ctx.arc(px, py, p.kind === 'wall' ? 1.6 : 2.6, 0, Math.PI * 2);
-    ctx.fill();
+  // truth pillars (mock)
+  if (showTruth) {
+    ctx.strokeStyle = css('--truth'); ctx.setLineDash([3, 3]); ctx.lineWidth = 1.5;
+    const h = 25 * sc() + 4;
+    for (const [X, Y] of STATIC.truth_pillars) { const [a, b] = px(X, Y); ctx.strokeRect(a - h, b - h, 2 * h, 2 * h); }
+    ctx.setLineDash([]);
   }
-}
-
-// heading_deg is a GRID BEARING (0=N, CW). Screen direction: convert to a
-// maths angle (90 - bearing), then negate for the flipped canvas y-axis.
-function bearingToScreenAngle(bearingDeg) { return -(90 - bearingDeg) * Math.PI / 180; }
-
-function drawRobot(pose, color, filled) {
-  const [px, py] = toCanvas(pose.x_mm, pose.y_mm);
-  const h = bearingToScreenAngle(pose.heading_deg);
-  ctx.strokeStyle = color;
-  ctx.fillStyle = color;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(px, py, 9, 0, Math.PI * 2);
-  if (filled) ctx.fill(); else ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(px, py);
-  ctx.lineTo(px + 22 * Math.cos(h), py + 22 * Math.sin(h));
-  ctx.stroke();
-}
-
-function setText(id, text) { document.getElementById(id).textContent = text; }
-
-// 8 distinct, colourblind-safe colours (Okabe-Ito, black swapped to grey for
-// the dark mat), one per candidate by its stable `idx` from the server. The
-// arrow and its predicted-scan cloud share the candidate's colour so you can
-// tell the 8 overlays apart.
-const CAND_COLORS = ['#9aa0a6', '#E69F00', '#56B4E9', '#009E73',
-                     '#F0E442', '#0072B2', '#D55E00', '#CC79A7'];
-function candColor(idx) { return CAND_COLORS[idx % CAND_COLORS.length]; }
-function candLabel(c) { return c.section + (c.heading_variant === 'secondary' ? "'" : ''); }
-
-// The predicted LIDAR scan for a candidate: what the sensor WOULD see if the
-// robot were at this pose, ray-cast against walls+island with the rear blind
-// arc removed. Drawn as small dots in the candidate's colour so you can match
-// each predicted cloud to the single real scan and pick the right leg.
-function drawCandidatePrediction(c) {
-  const col = candColor(c.idx);
-  ctx.save();
-  ctx.fillStyle = col;
-  ctx.globalAlpha = 0.5;
-  for (const p of c.predicted || []) {
-    const [px, py] = toCanvas(p.x, p.y);
-    ctx.beginPath();
-    ctx.arc(px, py, 1.7, 0, Math.PI * 2);
-    ctx.fill();
+  // scans and path
+  const dots = (pts, col, r) => { ctx.fillStyle = col; for (const [X, Y] of pts) { const [a, b] = px(X, Y); ctx.fillRect(a - r / 2, b - r / 2, r, r); } };
+  if ($('showInit').checked && S.tracking) dots(STATIC.init_scan, css('--init'), 2);
+  if ($('showLive').checked) dots(S.live || [], css('--live'), 2.2);
+  if ($('showPath').checked && S.path && S.path.length > 1) {
+    ctx.strokeStyle = css('--path'); ctx.lineWidth = 1.5; ctx.beginPath();
+    S.path.forEach(([X, Y], i) => { const [a, b] = px(X, Y); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); }); ctx.stroke();
   }
-  ctx.restore();
-}
-
-// One of the 8 start-of-run candidates: 4 legs x (primary broadside heading,
-// secondary = primary+90deg for the both-axes view). Arrow in the candidate's
-// colour; secondary variants dashed to mark them as "not an actual broadside
-// solution here". A distinct arrow is drawn for each of the 8.
-function drawCandidate(c) {
-  const [px, py] = toCanvas(c.x_mm, c.y_mm);
-  const h = bearingToScreenAngle(c.heading_deg);
-  const dashed = c.heading_variant === 'secondary';
-  const col = candColor(c.idx);
-  ctx.save();
-  ctx.strokeStyle = col;
-  ctx.fillStyle = col;
-  ctx.lineWidth = 2;
-  ctx.globalAlpha = dashed ? 0.7 : 1.0;
-  if (dashed) ctx.setLineDash([4, 3]);
-  ctx.beginPath();
-  ctx.arc(px, py, 5, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(px, py);
-  ctx.lineTo(px + 26 * Math.cos(h), py + 26 * Math.sin(h));
-  ctx.stroke();
-  ctx.restore();
-
-  ctx.save();
-  ctx.globalAlpha = 0.95;
-  ctx.fillStyle = col;
-  ctx.font = 'bold 11px sans-serif';
-  ctx.fillText(candLabel(c), px + 7 * Math.cos(h) + 6, py + 7 * Math.sin(h) - 6);
-  ctx.restore();
-}
-
-function drawStartCandidates(candidates) {
-  // predicted clouds under the arrows, arrows on top
-  for (const c of candidates || []) drawCandidatePrediction(c);
-  for (const c of candidates || []) drawCandidate(c);
-}
-
-// Numeric readout of the 8 candidates: colour swatch, label, (x,y), bearing.
-function renderCandidateTable(candidates) {
-  const box = document.getElementById('candList');
-  if (!candidates || !candidates.length) {
-    box.innerHTML = '<div class="muted-note">No candidates — the start-of-run fix hasn’t succeeded yet (needs a broadside placement).</div>';
-    return;
-  }
-  let html = '';
-  for (const c of candidates) {
-    const col = candColor(c.idx);
-    const variant = c.heading_variant === 'secondary' ? '+90°' : 'driving';
-    html += `<div class="cand-row">`
-      + `<span class="cand-sw" style="background:${col}"></span>`
-      + `<span class="cand-tag">${candLabel(c)}</span>`
-      + `<span class="cand-xy">(${c.x_mm.toFixed(0)}, ${c.y_mm.toFixed(0)})</span>`
-      + `<span class="cand-hd">${c.heading_deg.toFixed(0)}° <em>${variant}</em></span>`
-      + `</div>`;
-  }
-  box.innerHTML = html;
-}
-
-/* ===================================================================== */
-/* LANE VIEW -- the lane-local frame seat_occupancy.py works in.          */
-/* Drawn with grid north UP, because grid north IS the direction of       */
-/* travel: the robot always drives up the screen, whichever of the four   */
-/* lanes it is on. x runs left-to-right from the LEFT-hand wall.          */
-/* ===================================================================== */
-const laneCanvas = document.getElementById('lane');
-const lctx = laneCanvas.getContext('2d');
-const LANE_MARGIN = 30;
-let laneScale = 0.2, laneOx = 0, laneOy = 0;
-
-const SEAT_COLORS = { occupied: '#e5556b', empty: '#3ecf8e', unknown: '#ffb454' };
-
-function laneSetup() {
-  const L = field.lane;
-  // One scale for both axes -- this is a geometry debug view, so it is drawn
-  // to true scale and never stretched to fill the canvas.
-  laneScale = (laneCanvas.height - 2 * LANE_MARGIN) / L.length_mm;
-  laneOx = (laneCanvas.width - L.width_mm * laneScale) / 2;
-  laneOy = laneCanvas.height - LANE_MARGIN;
-}
-function toLaneCanvas(x_mm, y_mm) {
-  return [laneOx + x_mm * laneScale, laneOy - y_mm * laneScale];
-}
-
-function drawLaneField(sv) {
-  const L = field.lane;
-  lctx.clearRect(0, 0, laneCanvas.width, laneCanvas.height);
-  const [x0, yTop] = toLaneCanvas(0, L.length_mm);
-  const w = L.width_mm * laneScale, h = L.length_mm * laneScale;
-
-  // corner sections (no seats live here) then the straightforward section
-  lctx.fillStyle = '#141b2c';
-  lctx.fillRect(x0, yTop, w, h);
-  const [, ySecTop] = toLaneCanvas(0, L.section_y_max_mm);
-  const [, ySecBot] = toLaneCanvas(0, L.section_y_min_mm);
-  lctx.fillStyle = '#1c2740';
-  lctx.fillRect(x0, ySecTop, w, ySecBot - ySecTop);
-  lctx.strokeStyle = '#2e3a55';
-  lctx.setLineDash([4, 4]); lctx.lineWidth = 1;
-  for (const y of [L.section_y_min_mm, L.section_y_max_mm]) {
-    const [, py] = toLaneCanvas(0, y);
-    lctx.beginPath(); lctx.moveTo(x0, py); lctx.lineTo(x0 + w, py); lctx.stroke();
-  }
-  lctx.setLineDash([]);
-
-  // the two walls. Which one is the OUTER wall depends only on the driving
-  // direction -- CCW keeps it on the right.
-  const outerRight = sv && sv.outer_wall_side === 'right';
-  lctx.lineWidth = 3;
-  lctx.strokeStyle = '#4c5b7a';
-  lctx.beginPath(); lctx.moveTo(x0, yTop); lctx.lineTo(x0, yTop + h); lctx.stroke();
-  lctx.beginPath(); lctx.moveTo(x0 + w, yTop); lctx.lineTo(x0 + w, yTop + h); lctx.stroke();
-
-  // lane centreline -- the seats straddle it by 100mm either side
-  lctx.save();
-  lctx.strokeStyle = '#26314a'; lctx.lineWidth = 1; lctx.setLineDash([2, 6]);
-  const [xc] = toLaneCanvas(L.width_mm / 2, 0);
-  lctx.beginPath(); lctx.moveTo(xc, yTop); lctx.lineTo(xc, yTop + h); lctx.stroke();
-  lctx.restore();
-
-  lctx.save();
-  lctx.fillStyle = '#8993a8'; lctx.font = '10px sans-serif';
-  lctx.textAlign = 'right';
-  lctx.fillText(outerRight ? 'left wall (island)' : 'left wall (OUTER)', x0 - 8, yTop - 8);
-  lctx.textAlign = 'left';
-  lctx.fillText(outerRight ? 'right wall (OUTER)' : 'right wall (island)', x0 + w + 8, yTop - 8);
-  // the island only exists alongside the straightforward section
-  lctx.fillStyle = '#6b7590';
-  lctx.fillText('island only spans', x0 + w + 10, ySecTop + 12);
-  lctx.fillText('this band', x0 + w + 10, ySecTop + 23);
-  lctx.restore();
-
-  // grid north arrow
-  lctx.save();
-  lctx.strokeStyle = '#5aa9ff'; lctx.fillStyle = '#5aa9ff'; lctx.lineWidth = 2;
-  const ax = x0 - 22, ay0 = yTop + 70, ay1 = yTop + 26;
-  lctx.beginPath(); lctx.moveTo(ax, ay0); lctx.lineTo(ax, ay1); lctx.stroke();
-  lctx.beginPath(); lctx.moveTo(ax, ay1 - 5); lctx.lineTo(ax - 4, ay1 + 3); lctx.lineTo(ax + 4, ay1 + 3);
-  lctx.closePath(); lctx.fill();
-  lctx.font = '9px sans-serif'; lctx.textAlign = 'center';
-  lctx.fillText('grid N', ax, ay0 + 12);
-  lctx.fillText('(travel)', ax, ay0 + 22);
-  lctx.restore();
-
-  // y axis ticks every 500mm
-  lctx.save();
-  lctx.fillStyle = '#556077'; lctx.font = '9px sans-serif'; lctx.textAlign = 'right';
-  // topmost tick is skipped -- it sits where the wall labels go
-  for (let y = 0; y < L.length_mm; y += 500) {
-    const [, py] = toLaneCanvas(0, y);
-    lctx.fillText(String(y), x0 - 44, py + 3);
-  }
-  lctx.restore();
-}
-
-// Re-project the point cloud already streamed for the mat view, using the six
-// affine coefficients the server sends -- no second copy of the scan on the wire.
-function drawLanePoints(points, affine) {
-  if (!affine) return;
-  const [a11, a12, c1, a21, a22, c2] = affine;
-  for (const p of points) {
-    const lx = a11 * p.x + a12 * p.y + c1;
-    const ly = a21 * p.x + a22 * p.y + c2;
-    const [px, py] = toLaneCanvas(lx, ly);
-    if (px < -20 || px > laneCanvas.width + 20 || py < -20 || py > laneCanvas.height + 20) continue;
-    lctx.fillStyle = p.kind === 'wall' ? '#33507d' : (p.kind === 'pillar' ? '#ffb454' : '#3a4457');
-    lctx.beginPath();
-    lctx.arc(px, py, p.kind === 'wall' ? 1.4 : 2.4, 0, Math.PI * 2);
-    lctx.fill();
-  }
-}
-
-// The search window: the wedge the detector actually looked in, drawn from the
-// SENSOR (not the pose reference point) out to just past the seat. When a
-// verdict looks wrong on the bench, this is the thing to read -- if the wedge
-// misses the pillar the bearing is wrong (pose/yaw); if it covers it but the
-// range disagrees, it is a calibration or lever-arm problem.
-function drawSeatRay(sv, seat) {
-  const col = SEAT_COLORS[seat.state] || '#556077';
-  const [sx, sy] = toLaneCanvas(sv.sensor.x_mm, sv.sensor.y_mm);
-  // lane bearing -> screen angle (bearing is clockwise from +y, canvas y is flipped)
-  const br = seat.bearing_deg * Math.PI / 180;
-  const hw = (seat.half_width_deg || 0) * Math.PI / 180;
-  const r = (seat.expected_centre_mm + 90) * laneScale;
-  const dir = (a) => [Math.sin(a), -Math.cos(a)];
-
-  lctx.save();
-  lctx.globalAlpha = 0.16;
-  lctx.fillStyle = col;
-  lctx.beginPath();
-  lctx.moveTo(sx, sy);
-  for (let a = br - hw; a <= br + hw + 1e-9; a += Math.max(hw / 6, 0.004)) {
-    const [dx, dy] = dir(a);
-    lctx.lineTo(sx + r * dx, sy + r * dy);
-  }
-  lctx.closePath(); lctx.fill();
-  lctx.restore();
-
-  lctx.save();
-  lctx.strokeStyle = col;
-  lctx.globalAlpha = seat.state === 'unknown' ? 0.45 : 0.8;
-  lctx.lineWidth = 1;
-  if (seat.state === 'unknown') lctx.setLineDash([3, 3]);
-  const [dx, dy] = dir(br);
-  lctx.beginPath(); lctx.moveTo(sx, sy);
-  lctx.lineTo(sx + seat.expected_centre_mm * laneScale * dx,
-              sy + seat.expected_centre_mm * laneScale * dy);
-  lctx.stroke();
-  lctx.restore();
-
-  // where the ray actually stopped
-  if (seat.observed_mm != null) {
-    const ox = sx + seat.observed_mm * laneScale * dx;
-    const oy = sy + seat.observed_mm * laneScale * dy;
-    lctx.save();
-    lctx.strokeStyle = col; lctx.globalAlpha = 0.9; lctx.lineWidth = 1.5;
-    lctx.beginPath(); lctx.moveTo(ox - 3, oy - 3); lctx.lineTo(ox + 3, oy + 3);
-    lctx.moveTo(ox + 3, oy - 3); lctx.lineTo(ox - 3, oy + 3);
-    lctx.stroke(); lctx.restore();
-  }
-}
-
-function drawSeat(sv, seat) {
-  const L = field.lane;
-  const col = SEAT_COLORS[seat.state] || '#556077';
-  const [cx, cy] = toLaneCanvas(seat.x_mm, seat.y_mm);
-  const half = (L.seat_size_mm / 2) * laneScale;
-  const rad = (L.seat_circle_dia_mm / 2) * laneScale;
-
-  // the 85mm "was it moved" circle from rule 13.15
-  lctx.save();
-  lctx.strokeStyle = '#3a4666'; lctx.lineWidth = 1; lctx.globalAlpha = 0.9;
-  lctx.beginPath(); lctx.arc(cx, cy, rad, 0, Math.PI * 2); lctx.stroke();
-  lctx.restore();
-
-  lctx.save();
-  if (seat.state === 'occupied') {
-    lctx.fillStyle = col; lctx.fillRect(cx - half, cy - half, half * 2, half * 2);
-  } else if (seat.state === 'empty') {
-    lctx.strokeStyle = col; lctx.lineWidth = 1.5;
-    lctx.strokeRect(cx - half, cy - half, half * 2, half * 2);
-  } else {
-    lctx.strokeStyle = col; lctx.lineWidth = 1.5; lctx.setLineDash([2, 2]);
-    lctx.strokeRect(cx - half, cy - half, half * 2, half * 2);
-  }
-  lctx.restore();
-
-  // Ground truth ring (mock only). Only a DECIDED verdict can contradict the
-  // truth -- an UNKNOWN seat is undecided, not wrong, so it is left unmarked.
-  if (seat.truth !== null && seat.truth !== undefined && seat.state !== 'unknown') {
-    const agrees = (seat.state === 'occupied') === !!seat.truth;
-    if (!agrees) {
-      lctx.save();
-      lctx.strokeStyle = '#ffffff'; lctx.lineWidth = 1.5; lctx.setLineDash([2, 2]);
-      lctx.beginPath(); lctx.arc(cx, cy, rad + 5, 0, Math.PI * 2); lctx.stroke();
-      lctx.restore();
+  // seats
+  const s = 25 * sc() + 3;
+  for (const lane of (S.lanes || [])) {
+    const truth = S.truth ? new Set((S.truth.seats_by_slot[lane.slot] || [])) : null;
+    for (const seat of lane.seats) {
+      const [a, b] = px(seat.X, seat.Y);
+      ctx.save(); ctx.translate(a, b);
+      if (seat.source === 'entry') ctx.rotate(Math.PI / 4);
+      ctx.lineWidth = 2;
+      if (seat.state === 'occupied') { ctx.fillStyle = css('--present'); ctx.fillRect(-s, -s, 2 * s, 2 * s); }
+      else if (seat.state === 'empty') { ctx.strokeStyle = css('--absent'); ctx.strokeRect(-s, -s, 2 * s, 2 * s); }
+      else { ctx.strokeStyle = css('--unknown'); ctx.setLineDash([3, 3]); ctx.strokeRect(-s, -s, 2 * s, 2 * s); ctx.setLineDash([]); }
+      ctx.restore();
+      if (truth && seat.state !== 'unknown' && (seat.state === 'occupied') !== truth.has(seat.index)) {
+        ctx.strokeStyle = css('--bad'); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(a, b, s + 6, 0, 2 * Math.PI); ctx.stroke();
+      }
+      seatHits.push({ a, b, lane, seat, wrong: truth && seat.state !== 'unknown' && (seat.state === 'occupied') !== truth.has(seat.index) });
     }
   }
-
-  lctx.save();
-  lctx.fillStyle = col; lctx.font = 'bold 10px sans-serif';
-  const onLeft = seat.x_mm < L.width_mm / 2;
-  lctx.textAlign = onLeft ? 'right' : 'left';
-  lctx.fillText(`${seat.index} ${seat.name}`, cx + (onLeft ? -rad - 6 : rad + 6), cy - 2);
-  lctx.fillStyle = '#8993a8'; lctx.font = '9px sans-serif';
-  const obs = seat.observed_mm == null ? 'no return' : `${seat.observed_mm.toFixed(0)}`;
-  lctx.fillText(`exp ${seat.expected_face_mm.toFixed(0)} / obs ${obs}`,
-                cx + (onLeft ? -rad - 6 : rad + 6), cy + 9);
-  lctx.restore();
+  // robots
+  const arrow = (X, Y, brg, col, fill) => {
+    const [a, b] = px(X, Y), r = 14, t = brg * Math.PI / 180;
+    ctx.save(); ctx.translate(a, b); ctx.rotate(t);
+    ctx.beginPath(); ctx.moveTo(0, -r); ctx.lineTo(r * 0.6, r * 0.7); ctx.lineTo(0, r * 0.35); ctx.lineTo(-r * 0.6, r * 0.7); ctx.closePath();
+    if (fill) { ctx.fillStyle = col; ctx.fill(); } else { ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke(); }
+    ctx.restore();
+  };
+  if (showTruth && S.truth) arrow(S.truth.robot.X, S.truth.robot.Y, S.truth.robot.bearing, css('--truth'), false);
+  if (S.robot) arrow(S.robot.X, S.robot.Y, S.robot.bearing, css('--robot'), true);
+  else if (!S.tracking) arrow(1500, 1500, 0, css('--robot'), true);
 }
 
-function drawLaneRobot(sv) {
-  const [px, py] = toLaneCanvas(sv.pose.x_mm, sv.pose.y_mm);
-  const a = sv.pose.yaw_deg * Math.PI / 180;
-  const dx = Math.sin(a), dy = -Math.cos(a);
+cv.addEventListener('mousemove', e => {
+  const r = cv.getBoundingClientRect(), k = cv.width / r.width;
+  const x = (e.clientX - r.left) * k, y = (e.clientY - r.top) * k;
+  let best = null, bd = 18 * k;
+  for (const h of seatHits) { const d = Math.hypot(h.a - x, h.b - y); if (d < bd) { bd = d; best = h; } }
+  const tip = $('tip');
+  if (!best) { tip.style.display = 'none'; return; }
+  const s = best.seat;
+  tip.innerHTML = `<b>lane ${best.lane.lane_number} · [${s.index}] ${esc(s.name)}</b><br>` +
+    `<span class="st-${s.state}">${s.state === 'occupied' ? 'PRESENT' : s.state === 'empty' ? 'absent' : 'unknown'}</span>` +
+    ` · from ${s.source === 'init' ? 'initialisation' : s.source === 'entry' ? 'the entry re-check' : '–'}` +
+    (s.at_y !== null ? ` at y ${s.at_y}` : '') + `<br><span class="muted">${esc(s.reason)}</span>` +
+    (best.wrong ? '<br><span class="bad">disagrees with the simulated truth</span>' : '');
+  tip.style.display = 'block';
+  tip.style.left = (e.clientX - r.left + 16) + 'px'; tip.style.top = (e.clientY - r.top + 16) + 'px';
+});
+cv.addEventListener('mouseleave', () => $('tip').style.display = 'none');
+for (const id of ['showLive', 'showInit', 'showPath', 'showTruth']) $(id).addEventListener('change', draw);
 
-  // the rear blind wedge, if one is modelled -- seats inside it can only ever
-  // come back UNKNOWN, so it belongs on screen next to them
-  const bw = sv.blind_arc ? sv.blind_arc.width_deg : 0;
-  if (bw > 0) {
-    const [sx, sy] = toLaneCanvas(sv.sensor.x_mm, sv.sensor.y_mm);
-    const centre = a + (sv.blind_arc.center_deg * Math.PI / 180);
-    const half = bw * Math.PI / 360;
-    lctx.save();
-    lctx.fillStyle = '#000000'; lctx.globalAlpha = 0.35;
-    lctx.beginPath(); lctx.moveTo(sx, sy);
-    for (let t = centre - half; t <= centre + half + 1e-9; t += 0.03) {
-      lctx.lineTo(sx + 2200 * laneScale * Math.sin(t), sy - 2200 * laneScale * Math.cos(t));
-    }
-    lctx.closePath(); lctx.fill();
-    lctx.restore();
+// ---- panel ------------------------------------------------------------------
+const kv = (el, rows) => { el.innerHTML = rows.map(([k, v]) => `<div>${esc(k)}</div><div>${v}</div>`).join(''); };
+const stateLabel = st => `<span class="st-${st}">${st === 'occupied' ? 'PRESENT' : st === 'empty' ? 'absent' : 'unknown'}</span>`;
+
+function renderPanel() {
+  $('modeBadge').textContent = S.mode.toUpperCase(); $('modeBadge').className = 'badge ' + S.mode;
+  $('message').textContent = S.message; $('error').textContent = S.error ? 'loop error: ' + S.error : '';
+  $('initBtn').textContent = S.tracking ? 'Re-initialise' : 'Initialise';
+  $('mockCtl').style.display = S.mode === 'mock' ? 'flex' : 'none';
+  $('truthToggle').style.display = S.mode === 'mock' ? 'inline-flex' : 'none';
+
+  const t = S.tracker;
+  kv($('tracker'), t ? [
+    ['lane', `${t.lane_index + 1} (lap ${t.lap}, lane ${t.slot + 1} of the loop)`],
+    ['x (from outer wall)', fmt(t.x, ' mm')], ['y (along the lane)', fmt(t.y, ' mm')],
+    ['ψ (to the lane)', fmt(t.psi, '°')], ['heading (to lane 1, unwrapped)', fmt(t.heading, '°')],
+    ['start heading ψ0', fmt(t.psi0, '°') + ' <span class="muted small">(wall fit)</span>'],
+    ['distance', fmt(t.distance_mm !== null ? (t.distance_mm / 1000).toFixed(2) : null, ' m')],
+    ['entry re-check', t.recheck_active ? '<span class="warn">RUNNING</span>' : '<span class="muted">off</span>'],
+  ] : [['state', 'not initialised']]);
+
+  $('lanes').innerHTML = (S.lanes || []).map(l => {
+    const truth = S.truth ? new Set(S.truth.seats_by_slot[l.slot] || []) : null;
+    const chips = l.seats.map(s => {
+      const wrong = truth && s.state !== 'unknown' && (s.state === 'occupied') !== truth.has(s.index);
+      return `<span class="chip" title="${esc(s.name + ': ' + s.reason)}">[${s.index}] ${stateLabel(s.state)}${wrong ? ' <span class="bad">✗</span>' : ''}</span>`;
+    }).join('');
+    const src = l.source === 'init' ? 'initialisation' :
+      `entry re-check: ${l.frames_used} frames used, ${l.frames_skipped_align} skipped (±20° gate); de-skew moved returns up to ${fmt(l.max_shift_mm, ' mm')}, dropped ${l.returns_dropped_old} stale${l.frames_skipped_old ? `, ${l.frames_skipped_old} frames from before the lane skipped` : ''}${l.frozen ? '' : ' <span class="warn">(still running)</span>'}`;
+    return `<div style="margin-bottom:8px"><b>Lane ${l.lane_number}</b> <span class="muted small">${src}</span><div class="chips" style="margin-top:4px">${chips}</div></div>`;
+  }).join('') || '<span class="muted">none yet</span>';
+
+  const I = S.init;
+  if (!I) $('init').innerHTML = '<span class="muted">not initialised</span>';
+  else {
+    const side = s => s ? `<tr><td>${s.side}</td><td>${fmt(s.d_mm, ' mm')}</td><td>${fmt(s.fit_deg, '°')}</td><td>${fmt(s.opening_mm, ' mm')}</td><td>${s.opening_from_mm !== null ? `${s.opening_from_mm}–${s.opening_to_mm} mm` : '–'}</td><td>${s.n_wall}/${s.n_through}/${s.n_blocked}</td></tr>` : '';
+    $('init').innerHTML =
+      `<div class="${I.ok ? 'ok' : 'bad'}"><b>${I.ok ? 'OK' : 'FAILED'}</b> — ${esc(I.reason)}</div>` +
+      `<div style="margin:6px 0"><b>Direction ${esc(I.direction || 'UNDETERMINED')}</b> <span class="muted">${esc(I.direction_reason)}</span></div>` +
+      `<table><tr><th>side</th><th>wall</th><th>tilt</th><th>opening</th><th>where (ahead)</th><th>wall/through/blocked</th></tr>${side(I.left)}${side(I.right)}</table>` +
+      (I.x ? `<div style="margin-top:6px">x = <b>${fmt(I.x.x_mm, ' mm')}</b> from the outer wall <span class="muted">(d90 ${fmt(I.x.d90_mm)}, d270 ${fmt(I.x.d270_mm)}, sum ${fmt(I.x.sum_mm)} mm) ${esc(I.x.reason)}</span></div>` : '') +
+      (I.y ? `<div>y = <b>${fmt(I.y.y_mm, ' mm')}</b> from the wall behind <span class="muted">(front ${fmt(I.y.front_mm)} mm, median of ${I.y.n_front} of ${I.y.n_fan} fan returns) ${esc(I.y.reason)}</span></div>` : '') +
+      (I.psi0 !== undefined ? `<div>start heading ψ0 = ${fmt(I.psi0, '°')} <span class="muted">(tracker only; x, y and seats take yaw 0)</span></div>` : '') +
+      (I.seats.length ? `<table style="margin-top:6px"><tr><th>seat</th><th>verdict</th><th>why</th></tr>${I.seats.map(s => `<tr><td>[${s.index}] ${esc(s.name)}</td><td>${stateLabel(s.state)}</td><td class="muted">${esc(s.reason)}</td></tr>`).join('')}</table>` : '');
   }
 
-  lctx.save();
-  lctx.strokeStyle = '#5aa9ff'; lctx.fillStyle = '#5aa9ff'; lctx.lineWidth = 2;
-  lctx.beginPath(); lctx.arc(px, py, 8, 0, Math.PI * 2); lctx.fill();
-  lctx.beginPath(); lctx.moveTo(px, py); lctx.lineTo(px + 26 * dx, py + 26 * dy); lctx.stroke();
-  lctx.restore();
-
-  // Grid north IS the direction of travel, so the arrow should point up the
-  // screen. If it does not, the heading feeding this view disagrees with the
-  // direction the robot is moving -- say so on the canvas, because otherwise
-  // it reads as a fault in the drawing rather than in the heading.
-  if (Math.abs(sv.pose.yaw_deg) > 90) {
-    lctx.save();
-    lctx.fillStyle = '#ffb454'; lctx.font = 'bold 10px sans-serif'; lctx.textAlign = 'left';
-    lctx.fillText('heading is ' + Math.abs(sv.pose.yaw_deg).toFixed(0) + '° from travel', px + 14, py + 4);
-    lctx.fillStyle = '#8993a8'; lctx.font = '9px sans-serif';
-    lctx.fillText('(see the convention warning)', px + 14, py + 15);
-    lctx.restore();
-  }
-
-  // sensor origin, when the lever arm puts it somewhere else
-  const [sx, sy] = toLaneCanvas(sv.sensor.x_mm, sv.sensor.y_mm);
-  if (Math.hypot(sx - px, sy - py) > 1.5) {
-    lctx.save();
-    lctx.strokeStyle = '#e7ecf5'; lctx.lineWidth = 1;
-    lctx.beginPath(); lctx.moveTo(sx - 4, sy); lctx.lineTo(sx + 4, sy);
-    lctx.moveTo(sx, sy - 4); lctx.lineTo(sx, sy + 4); lctx.stroke();
-    lctx.restore();
+  const m = S.imu || {};
+  kv($('imu'), [
+    ['port', esc(m.port)], ['link', m.error ? `<span class="bad">${esc(m.error)}</span>` : (m.stale ? '<span class="bad">STALE</span>' : '<span class="ok">OK</span>')],
+    ['rate', fmt(m.rate_hz, ' Hz')], ['last line', fmt(m.last_age_s, ' s ago')],
+    ['lines ok / bad', `${fmt(m.lines_ok)} / ${fmt(m.lines_bad)}`], ['lost (seq gaps)', fmt(m.seq_gaps)], ['STM32 restarts', fmt(m.seq_resets)],
+    ['raw yaw / enc', m.last ? `${m.last.yaw_deg}° / ${m.last.enc}` : '–'],
+    ['heading / distance', m.heading_deg !== undefined ? `${m.heading_deg}° / ${(m.distance_mm / 1000).toFixed(2)} m` : '–'],
+    ...(m.last_bad_reason ? [['last bad line', `<span class="muted small">${esc(m.last_bad_reason)}</span>`]] : []),
+  ]);
+  const L = S.lidar || {};
+  kv($('lidar'), [
+    ['driver', L.error ? `<span class="bad">${esc(String(L.error).split('\n').slice(-2).join(' '))}</span>` : (L.thread_alive === false ? '<span class="bad">stopped</span>' : '<span class="ok">running</span>') + (L.simulated ? ' <span class="muted">(simulated)</span>' : '')],
+    ['spin', fmt(L.spin_hz, ' Hz')], ['last return', fmt(L.last_return_age_s, ' s ago')],
+    ['angle stepped back', fmt(L.backwards_steps) + ' <span class="muted small">(should stay ~0)</span>'],
+    ...(L.points_received_total !== undefined ? [['returns received', fmt(L.points_received_total)]] : []),
+  ]);
+  $('events').innerHTML = t ? t.events.slice().reverse().map(e => `<div><span class="muted">${e.t.toFixed(2)} s</span> <b>${esc(e.kind)}</b> ${esc(e.detail)}</div>`).join('') : '';
+  if (S.mode === 'mock' && S.mock && !mockSynced) {     // once: after that the inputs are the source of truth
+    mockSynced = true;
+    $('mDir').value = S.mock.direction; $('mSec').value = ORDER[S.mock.direction][S.mock.start_slot];
+    $('mSeed').value = S.mock.seed; $('mSpeed').value = S.mock.speed_mm_s; $('mScale').value = String(S.mock.time_scale);
   }
 }
 
-function drawLaneView(state) {
-  const sv = state.seat_view;
-  if (!field || !field.lane) return;
-  laneSetup();
-  drawLaneField(sv);
-  if (!sv) {
-    lctx.fillStyle = '#8993a8'; lctx.font = '12px sans-serif'; lctx.textAlign = 'center';
-    lctx.fillText('no seat data in this frame', laneCanvas.width / 2, laneCanvas.height / 2);
-    return;
-  }
-  drawLanePoints(state.points || [], sv.affine);
-  for (const s of sv.seats) drawSeatRay(sv, s);
-  for (const s of sv.seats) drawSeat(sv, s);
-  drawLaneRobot(sv);
-}
-
-function renderSeatPanel(sv) {
-  if (!sv) return;
-  const c = sv.counts;
-  document.getElementById('seatHead').innerHTML =
-      `<span class="pill occ">${c.occupied} occupied</span>`
-    + `<span class="pill emp">${c.empty} empty</span>`
-    + `<span class="pill unk">${c.unknown} unknown</span>`
-    + `<span class="pill info">section ${sv.section} &middot; ${sv.direction}</span>`
-    + `<span class="pill info">pose: ${sv.pose_source}</span>`
-    + (sv.sticky ? '<span class="pill info">held</span>' : '');
-
-  setText('lanePose', `${sv.pose.x_mm.toFixed(0)}, ${sv.pose.y_mm.toFixed(0)}`);
-  setText('laneYaw', `${sv.pose.yaw_deg.toFixed(1)}°`
-    + (sv.yaw_offset_deg ? ` (incl. ${sv.yaw_offset_deg}° offset)` : ''));
-  setText('laneNorth', `${sv.grid_north_deg.toFixed(0)}° · outer wall on the ${sv.outer_wall_side}`);
-
-  let html = '<tr><th>seat</th><th>state</th><th>live</th><th>brg</th>'
-           + '<th>exp</th><th>obs</th><th>Δ</th><th>n</th><th title="returns a pillar here would give at this scan\'s resolution">hits</th><th>truth</th></tr>';
-  for (const s of sv.seats) {
-    const cls = s.state === 'occupied' ? 'occ' : (s.state === 'empty' ? 'emp' : 'unk');
-    const hasTruth = (s.truth !== null && s.truth !== undefined);
-    // UNKNOWN is undecided, not wrong -- only a decided verdict can mismatch.
-    const agrees = (!hasTruth || s.state === 'unknown')
-      ? true : ((s.state === 'occupied') === !!s.truth);
-    const num = (v, d) => (v === null || v === undefined) ? '—' : v.toFixed(d === undefined ? 0 : d);
-    html += `<tr class="${cls} ${agrees ? '' : 'mismatch'}">`
-      + `<td>${s.index} ${s.name}</td>`
-      + `<td>${s.state}</td>`
-      + `<td style="color:#8993a8">${s.live_state}</td>`
-      + `<td>${num(s.bearing_deg, 1)}°</td>`
-      + `<td>${num(s.expected_face_mm)}</td>`
-      + `<td>${num(s.observed_mm)}</td>`
-      + `<td>${num(s.residual_mm)}</td>`
-      + `<td>${s.n_points}</td>`
-      + `<td>${num(s.expected_hits, 1)}</td>`
-      + `<td>${hasTruth ? (s.truth ? 'pillar' : 'clear') : '—'}</td>`
-      + `</tr>`;
-    html += `<tr><td colspan="10" class="seat-reason">${s.reason || ''}</td></tr>`;
-  }
-  document.getElementById('seatTable').innerHTML = html;
-}
-
-let activeView = 'mat';
-function setView(name) {
-  activeView = name;
-  document.querySelectorAll('.tab').forEach(t =>
-    t.classList.toggle('active', t.dataset.view === name));
-  document.querySelectorAll('.view').forEach(v =>
-    v.classList.toggle('active', v.dataset.view === name));
-  document.getElementById('seatBlock').style.display = (name === 'lane') ? 'block' : 'none';
-  document.getElementById('matBlock').style.display = (name === 'lane') ? 'none' : 'block';
-  if (lastState) render(lastState);
-}
-
-function renderWarnings(warnings) {
-  const box = document.getElementById('warnBox');
-  if (!warnings || !warnings.length) { box.innerHTML = ''; return; }
-  box.innerHTML = '<div class="warnbox"><b>TWO CONVENTIONS IN THIS CODEBASE</b>'
-    + 'The lane view uses the geometry of the mat. localization.py disagrees with it '
-    + 'in the places below, so a pose it produces may be mirrored or reversed — the '
-    + 'lane view will faithfully draw whatever it is given.'
-    + '<ul>' + warnings.map(w => `<li>${w}</li>`).join('') + '</ul></div>';
-}
-
-let lastState = null;
-
-// Shared by both views -- the estimated pose block stays visible in each.
-function updateReadouts(state) {
-  setText('mode', state.mode);
-  setText('section', state.estimated.section);
-  setText('xy', `${state.estimated.x_mm.toFixed(0)}, ${state.estimated.y_mm.toFixed(0)}`);
-  setText('heading', state.estimated.heading_deg.toFixed(1));
-  setText('lateral', state.estimated.lateral_mm.toFixed(0));
-  setText('along', state.estimated.along_mm.toFixed(0));
-}
-
-function render(state) {
-  lastState = state;
-  if (activeView === 'lane') {
-    drawLaneView(state);
-    renderSeatPanel(state.seat_view);
-    updateReadouts(state);
-    return;
-  }
-  drawField();
-  drawPillars(state.pillars);
-  drawPoints(state.points);
-  drawStartCandidates(state.start_candidates);
-  if (state.true) drawRobot(state.true, '#8993a8', false);
-  drawRobot(state.estimated, '#5aa9ff', true);
-
-  updateReadouts(state);
-
-  const fix = state.last_fix;
-  const badge = document.getElementById('fixStatus');
-  if (fix) {
-    badge.innerHTML = `<span class="badge ${fix.ok ? 'ok' : 'bad'}">${fix.ok ? 'OK' : 'REJECTED'}</span>`;
-    setText('frontBack', (fix.front_mm ?? '-') + ' / ' + (fix.back_mm ?? '-'));
-    setText('reason', fix.reason || '');
-  }
-
-  const sfix = state.start_fix;
-  const sbadge = document.getElementById('startFixStatus');
-  if (sfix) {
-    sbadge.innerHTML = `<span class="badge ${sfix.ok ? 'ok' : 'bad'}">${sfix.ok ? 'OK' : 'REJECTED'}</span>`;
-    setText('startLeftRight', (sfix.left_mm ?? '-') + ' / ' + (sfix.right_mm ?? '-'));
-    setText('startLaneSum', sfix.lane_sum_mm ?? '-');
-    setText('startForward', sfix.forward_mm ?? '-');
-    setText('startLatAlong', `${sfix.lateral_mm ?? '-'} / ${sfix.along_mm ?? '-'}`);
-    setText('startReason', sfix.reason || '');
-  }
-
-  renderCandidateTable(state.start_candidates);
-}
-
-function escAttr(v) { return String(v).replace(/"/g, '&quot;'); }
-
-async function postJSON(url, body) {
+// ---- controls -----------------------------------------------------------------------
+async function post(url, body) {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
   return r.json();
 }
-function tstatus(msg, bad) {
-  const el = document.getElementById('tstatus');
-  if (el) { el.textContent = msg; el.style.color = bad ? '#e5556b' : '#8993a8'; }
+let mockSynced = false;
+async function pushMock() {
+  const dir = $('mDir').value;
+  await post('/api/mock', { direction: dir, start_slot: ORDER[dir].indexOf($('mSec').value), seed: +$('mSeed').value,
+                            speed_mm_s: +$('mSpeed').value, time_scale: +$('mScale').value });
 }
+for (const id of ['mDir', 'mSec', 'mSeed', 'mSpeed', 'mScale']) $(id).addEventListener('change', pushMock);
+$('initBtn').addEventListener('click', async () => {
+  $('initBtn').disabled = true;
+  try { const r = await post('/api/initialise'); if (!r.ok) $('message').textContent = r.reason; }
+  finally { $('initBtn').disabled = false; }
+});
+$('saveBtn').addEventListener('click', async () => {
+  const r = await post('/api/save-run');
+  $('saveResult').innerHTML = r.ok ? `Saved ${r.samples} STM32 samples + the start scan to <code>${esc(r.dir)}</code>. Replay: <code>${esc(r.replay)}</code>` : `<span class="bad">${esc(r.reason)}</span>`;
+});
 
-function tControl(p) {
-  const dn = `data-name="${escAttr(p.name)}" data-kind="${p.kind}" ${p.geo ? 'data-geo="1"' : ''}`;
-  if (!p.editable) {
-    const val = (p.value === null || p.value === undefined || p.value === '') ? '—' : p.value;
-    return `<span class="tparam-val">${val}${p.unit ? (' ' + p.unit) : ''}</span>`;
-  }
-  if (p.kind === 'bool') {
-    return `<input class="tedit-chk tedit" type="checkbox" ${dn} ${p.value ? 'checked' : ''}>`;
-  }
-  if (p.kind === 'enum' || (p.options && p.options.length)) {
-    const opts = (p.options || []).map(o => `<option value="${escAttr(o)}" ${String(o) === String(p.value) ? 'selected' : ''}>${o}</option>`).join('');
-    return `<select class="tedit" ${dn}>${opts}</select>`;
-  }
-  const step = (p.kind === 'int') ? '1' : 'any';
-  const v = (p.value === null || p.value === undefined) ? '' : p.value;
-  return `<input class="tedit" type="number" step="${step}" ${dn} value="${escAttr(v)}">`;
+// ---- tuning -------------------------------------------------------------------------
+async function loadTuning() {
+  const T = await (await fetch('/api/tuning')).json();
+  $('tuning').innerHTML = T.groups.map((g, gi) => `<details ${gi === 0 ? '' : ''}><summary>${esc(g.group)} <span class="muted small">(${g.params.length})</span></summary>` +
+    g.params.map(p => {
+      const input = p.options ? `<select data-name="${p.name}">${p.options.map(o => `<option ${o === p.value ? 'selected' : ''}>${o}</option>`).join('')}</select>`
+                              : `<input data-name="${p.name}" value="${esc(p.value)}" size="8">`;
+      return `<div class="param"><div><span class="name ${p.changed ? 'changed' : ''}">${esc(p.name)}</span>` +
+        `<span class="tag">${esc(p.when)}</span>${p.changed ? ` <span class="changed small">(config.py: ${esc(p.default)})</span>` : ''}</div>` +
+        `<div>${input} <span class="muted small">${esc(p.unit)}</span></div><div class="meaning">${esc(p.meaning)}</div><div class="err" data-err="${p.name}"></div></div>`;
+    }).join('') + '</details>').join('');
+  const open = JSON.parse(sessionStorage.getItem('openGroups') || '[]');
+  $('tuning').querySelectorAll('details').forEach((d, i) => { if (open.includes(i)) d.open = true;
+    d.addEventListener('toggle', () => { const o = []; $('tuning').querySelectorAll('details').forEach((x, j) => x.open && o.push(j));
+      try { sessionStorage.setItem('openGroups', JSON.stringify(o)); } catch (e) {} }); });
+  $('tuning').querySelectorAll('[data-name]').forEach(el => el.addEventListener('change', async () => {
+    const r = await post('/api/param', { name: el.dataset.name, value: el.value });
+    const err = $('tuning').querySelector(`[data-err="${el.dataset.name}"]`);
+    err.textContent = r.ok ? '' : r.error;
+    if (r.ok) loadTuning();
+  }));
 }
+$('resetBtn').addEventListener('click', async () => { await post('/api/tuning/reset'); loadTuning(); });
 
-function renderTuning(groups) {
-  const body = document.getElementById('tuningBody');
-  let html = '<div class="tcontrols">'
-    + '<button class="tbtn primary" id="btnRefit">Re-run start-of-run fix</button>'
-    + '<button class="tbtn" id="btnReset">Reset to file defaults</button>'
-    + '<span id="tstatus"></span></div>';
-  for (const g of groups) {
-    html += `<div class="tgroup"><div class="tgroup-h">${g.group}</div>`;
-    if (g.note) html += `<div class="tgroup-note">${g.note}</div>`;
-    for (const p of g.params) {
-      const badge = p.critical ? '<span class="crit-badge">must set</span>' : '';
-      html += `<div class="tparam"><div class="tparam-top">`
-        + `<span class="tparam-name ${p.critical ? 'crit' : ''}">${p.name}${p.unit ? ` <em style="opacity:.5;font-style:normal">(${p.unit})</em>` : ''}${badge}</span>`
-        + `${tControl(p)}</div>`
-        + `<div class="tparam-imp">${p.implication}</div></div>`;
-    }
-    html += `</div>`;
-  }
-  body.innerHTML = html;
-
-  body.querySelectorAll('.tedit').forEach(el => el.addEventListener('change', onEdit));
-  document.getElementById('btnRefit').addEventListener('click', onRefit);
-  document.getElementById('btnReset').addEventListener('click', onReset);
+// ---- stream ---------------------------------------------------------------------------
+async function onState(st) {
+  S = st;
+  if (S.init_id !== STATIC.init_id) { STATIC = await (await fetch('/api/static')).json(); }
+  renderPanel(); draw();
 }
-
-async function onEdit(e) {
-  const el = e.target;
-  const name = el.dataset.name;
-  const value = (el.type === 'checkbox') ? el.checked : el.value;
-  try {
-    const res = await postJSON('/api/param', { name, value });
-    if (res.ok) {
-      el.classList.add('okflash'); setTimeout(() => el.classList.remove('okflash'), 700);
-      tstatus(`set ${name} = ${res.value}`);
-      if (el.dataset.geo) { await loadField(); await refreshTuning(); }
-    } else {
-      el.classList.add('badflash'); setTimeout(() => el.classList.remove('badflash'), 1200);
-      tstatus(res.error || 'error', true);
-    }
-  } catch (err) { tstatus(String(err), true); }
-}
-
-async function onRefit() {
-  tstatus('re-running fix…');
-  const res = await postJSON('/api/refit', {});
-  if (res.ok) tstatus(`fix OK: along=${(res.along_mm ?? 0).toFixed ? res.along_mm.toFixed(0) : res.along_mm}, lateral=${res.lateral_mm != null ? Math.round(res.lateral_mm) : '-'}`);
-  else tstatus('fix REJECTED: ' + (res.reason || ''), true);
-}
-
-async function onReset() {
-  const res = await postJSON('/api/reset', {});
-  tstatus(res.ok ? `reset ${res.restored} params to file defaults` : 'reset failed', !res.ok);
-  await loadField();
-  await refreshTuning();
-}
-
-async function refreshTuning() {
-  try {
-    const tune = await (await fetch('/api/tuning')).json();
-    renderTuning(tune.groups);
-  } catch (e) { console.warn('tuning refresh failed', e); }
-}
-
-async function loadField() {
-  field = await (await fetch('/api/field')).json();
-  renderWarnings(field.convention_warnings);
-  drawField();
-  if (field.lane) laneSetup();
-}
-
-async function onSeatReset() {
-  const res = await postJSON('/api/seats/reset', {});
-  tstatus(res.ok ? 'held seat verdicts cleared' : 'seat reset failed', !res.ok);
-}
-
-async function init() {
-  await loadField();
-  await refreshTuning();
-
-  document.querySelectorAll('.tab').forEach(t =>
-    t.addEventListener('click', () => setView(t.dataset.view)));
-  document.getElementById('btnSeatReset').addEventListener('click', onSeatReset);
-
+function connect() {
   const es = new EventSource('/stream');
-  es.onmessage = (ev) => {
-    const state = JSON.parse(ev.data);
-    render(state);
-  };
-  es.onerror = () => { console.warn('stream disconnected, browser will retry'); };
+  es.onmessage = ev => onState(JSON.parse(ev.data));
+  es.onerror = () => { $('message').textContent = 'connection lost, retrying…'; };
 }
-init();
+loadTuning(); connect(); draw();
 </script>
 </body>
 </html>

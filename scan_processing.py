@@ -119,18 +119,35 @@ def clean_and_project(raw_points, angle_sign: int, angle_zero_offset_deg: float)
     (History: this once stored the raw angle while computing x/y from the
     corrected one -- harmless at sign=+1/offset=0, wrong the moment a real
     calibration was set. Fixed before the Sept 2026 changes; kept.)"""
-    pts = []
-    for angle_deg, dist_mm, quality in raw_points:
-        if dist_mm < MIN_RANGE_MM or dist_mm > MAX_RANGE_MM:
-            continue
-        if quality < MIN_QUALITY:
-            continue
-        fwd, right = angle_to_xy(angle_deg, dist_mm, angle_sign, angle_zero_offset_deg)
-        corrected_angle = (angle_sign * angle_deg + angle_zero_offset_deg) % 360.0
-        pts.append(ScanPoint(angle_deg=corrected_angle, dist_mm=dist_mm, quality=quality,
-                             fwd_mm=fwd, right_mm=right))
+    pts = [p for p in (_clean_one(a, d, q, angle_sign, angle_zero_offset_deg) for a, d, q in raw_points)
+           if p is not None]
     pts.sort(key=lambda p: p.angle_deg)
     return pts
+
+
+def clean_and_project_timed(raw_points, angle_sign: int, angle_zero_offset_deg: float
+                            ) -> tuple[list[ScanPoint], list[float]]:
+    """clean_and_project for (raw angle, dist, quality, t) returns, t being
+    each return's measurement time (lidar_source.get_latest_scan_timed).
+    Returns (points, times), sorted by corrected angle, times[i] belonging to
+    points[i]. Same filtering and the same calibration as clean_and_project."""
+    pairs = []
+    for a, d, q, t in raw_points:
+        p = _clean_one(a, d, q, angle_sign, angle_zero_offset_deg)
+        if p is not None:
+            pairs.append((p, t))
+    pairs.sort(key=lambda pt: pt[0].angle_deg)
+    return [p for p, _ in pairs], [t for _, t in pairs]
+
+
+def _clean_one(angle_deg, dist_mm, quality, angle_sign, angle_zero_offset_deg) -> ScanPoint | None:
+    if dist_mm < MIN_RANGE_MM or dist_mm > MAX_RANGE_MM:
+        return None
+    if quality < MIN_QUALITY:
+        return None
+    fwd, right = angle_to_xy(angle_deg, dist_mm, angle_sign, angle_zero_offset_deg)
+    corrected_angle = (angle_sign * angle_deg + angle_zero_offset_deg) % 360.0
+    return ScanPoint(angle_deg=corrected_angle, dist_mm=dist_mm, quality=quality, fwd_mm=fwd, right_mm=right)
 
 
 def _fit_line_tls(points: list[ScanPoint]) -> tuple[tuple[float, float], float, float]:

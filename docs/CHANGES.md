@@ -4,9 +4,9 @@ This is the running record of every change made to this repository from Septembe
 
 | Checkpoint | Content | Status |
 |---|---|---|
-| **A** | Clockwise conventions, lane frame with x from the outer wall, removal of mat-level code, simulator heading fix, **direction (gap) test**, **initialisation of x / y / seats** | Implemented and tested. First real-robot scan analysed (§5.7); two approved changes from it are implemented (A.2). **Awaiting your approval.** One open item: the LIDAR angle sign (§5.7.3). |
-| **B** | STM32 → Pi feed (BNO08x yaw + hall encoder), lane tracker, turn detection, lane switching, entry-corner seat re-check, simulated STM32 feed | Design agreed (§9). Not implemented. |
-| **C** | Dashboard rewritten lane-by-lane | Design agreed (§10). Not implemented. |
+| **A** | Clockwise conventions, lane frame with x from the outer wall, removal of mat-level code, simulator heading fix, **direction (gap) test**, **initialisation of x / y / seats** | Implemented and tested. Real-robot scans analysed (§5.7); the approved changes from them are implemented (A.2, A.3); the LIDAR angle sign is **measured (−1)**, and the first scan's direction is **confirmed CW** (§5.7.3). **APPROVED (23 Sept, decision #34).** |
+| **B** | STM32 → Pi feed (BNO08x yaw + hall encoder), lane tracker, turn detection, lane switching, entry-corner seat re-check, simulated STM32 feed, `run_track.py` review tool, de-skew of the re-check's LIDAR frames (P9) | **APPROVED (23 Sept, decisions #37 and #39).** |
+| **C** | Dashboard rewritten lane by lane, mock mode in real time, tuning panel, Save run; fixes P10 and P11 to B's entry re-check | **APPROVED (23 Sept, decisions #45 and #46).** |
 
 Nothing has been committed to git. Every change is an uncommitted edit on top of your last commit `dd9c8f4 added lane frame`, so `git diff` shows exactly what changed.
 
@@ -20,10 +20,10 @@ Nothing has been committed to git. Every change is an uncommitted edit on top of
 4. [Conventions](#4-conventions)
 5. [Initialisation, the complete mechanism](#5-initialisation-the-complete-mechanism)
 6. [Problems found in the existing code, and what happened to each](#6-problems-found-in-the-existing-code-and-what-happened-to-each)
-7. [File-by-file changes (checkpoint A)](#7-file-by-file-changes-checkpoint-a)
-8. [Verification (checkpoint A)](#8-verification-checkpoint-a)
-9. [Checkpoint B: agreed design (not implemented)](#9-checkpoint-b-agreed-design-not-implemented)
-10. [Checkpoint C: agreed design (not implemented)](#10-checkpoint-c-agreed-design-not-implemented)
+7. [File-by-file changes](#7-file-by-file-changes) (7.1 checkpoint A, 7.2 checkpoint B, 7.3 checkpoint C)
+8. [Verification](#8-verification) (8.1 checkpoint A, 8.2 checkpoint B, 8.3 checkpoint C)
+9. [Checkpoint B: the IMU tracking mechanism](#9-checkpoint-b-the-imu-tracking-mechanism)
+10. [Checkpoint C: the dashboard](#10-checkpoint-c-the-dashboard)
 11. [Things to measure or set on the real robot](#11-things-to-measure-or-set-on-the-real-robot)
 12. [How to run](#12-how-to-run)
 
@@ -98,15 +98,29 @@ These are the owner's answers, numbered in the order they were asked.
 | 27 | Gap test vs placement yaw (after the WRONG finding, §5.2.6) | **Fit the wall tilt inside the gap test only.** x, y and seats keep yaw 0 |
 | 28 | (After the first real scan, §5.7) Lane width on the practice field | **About 930 mm by tape. Make it a config value** (`config.LANE_WIDTH_MM`). The rulebook's 1000 stays the default; the owner sets the field's measured width. Seat positions on such a field: to be asked separately |
 | 29 | (After the first real scan) Side-wall measurement | **Use the dominant wall line within ±30° of 90°/270°** instead of the 2° ray median (supersedes #10's measurement; x is still "the distance at 90° / 270°") |
-| 30 | (After the first real scan) Which side the pillar beside the robot was on | **The robot's right**, with the robot facing CCW and the LIDAR mounted upside down. This contradicts the scan under either sign (§5.7.3), so a sign-check scan is needed. **OPEN** |
+| 30 | (After the first real scan) Which side the pillar beside the robot was on | **The robot's right**, with the robot reported as facing CCW and the LIDAR mounted upside down. This contradicted the scan under either sign (§5.7.3); resolved by #31 and #33 |
+| 31 | Sign-check scan (`test_data/real_2026-09-23_sign_check.json`) | An object placed about 30 cm to the robot's **right** read **raw 272°** (296 mm, 45 mm wide), so the upside-down LIDAR's raw angles run counter-clockwise: **`LIDAR_ANGLE_SIGN = −1`**, set in config per the §11 procedure |
+| 32 | Field measurements and seat positions | **"For everything else, use the rulebook positions and measurements along with some margins of error."** So `LANE_WIDTH_MM` stays at the rulebook 1000 (the owner no longer sets a field-specific value, replacing #28's plan), the lane-width margin `LANE_WIDTH_TOLERANCE_MM` goes from 40 to **100 mm** (value chosen by Claude, pending approval, §5.7.4), and seats stay at the rulebook positions with the detector's existing margins |
+| 33 | First scan: which side was the island on? | **The robot's right**, so it was a CW start. The earlier "CCW" was a mislabel. The code's answer (CW, x = 478 mm, y = 1464 mm) is confirmed |
+| 34 | Checkpoint A approval | **Approved, all items:** the lane-width check (within the margin); lever arm and blind wedge kept in config.py; `run_init.py` as the init tool; the side-wall measurement; the measured sign −1 and the ±100 mm margin; the README note; the simulator reporting angles in the LIDAR's own convention; the real scans kept as regression tests. The owner noted that **the second scan (sign check) was taken with the robot facing the inner wall** |
 
-Pending your approval at checkpoint A:
+| 35 | Checkpoint B: the tracker's starting heading | **"Wall-fit yaw, tracker only."** The tracker starts from the placement yaw that the gap test's wall fit measures (ψ0 = −wall angle). Initialisation's own x, y and seats keep yaw 0 (#4) |
+| 36 | Checkpoint B: calibration values | **Use the owner's defaults:** "IMU clockwise reads negative", so `IMU_YAW_SIGN = −1`; "TICKS_PER_CM = 14.853", so `ENCODER_TICKS_PER_CM = 14.853` (the STM32's cumulative `enc` counts these ticks; 1 tick = 0.6733 mm). This replaces the `ENCODER_MM_PER_COUNT` planned in the first B design |
 
-- the lane-sum precondition added to the gap test (§5.2, step 1)
-- the single source of truth for the lever arm and blind wedge (§5.5)
-- the `run_init.py` review tool (§12)
-- the banner added to README.md
-- **A.2:** the implementation of #28 and #29, including the lane-width bound on the wall search (§5.2.2, step 1), and your real scan kept as a regression test (`test_data/`, `test_real_scans.py`)
+| 37 | Checkpoint B approval (§9.13 items 1–5) | **Approved, all items:** `stm32_link.py`, `lane_tracker.py` (including the 3000 mm/s encoder-glitch limit), `run_track.py` (including taking the tracker's reference sample at the moment of the start scan), the simulation additions and the three test files |
+| 38 | P9: the LIDAR sweeps while the robot moves (§9.11) | **Option A, de-skew:** timestamp each LIDAR return, keep about 0.5 s of tracked-pose history, move each return to where the pose at the frame's end would see it, and add a way to measure the LIDAR vs STM32 delay on the robot |
+
+| 39 | P9 fix approval (§9.13 items 1–7) | **Approved, all items:** `timing.py`, the `lidar_source` timestamps, `deskew.py` and the pose history, `LIDAR_TIME_OFFSET_S` with `measure_lidar_delay.py`, the `run_track` and simulation changes, and the tests |
+| 40 | Next step | **Start checkpoint C** (the dashboard, §10) |
+| 41 | Dashboard: when initialisation runs | **On button press.** The server starts the LIDAR and STM32 and shows the live scan, but initialises only when **Initialise** is pressed with the robot standing still. Re-initialise clears every lane, seat and path and starts again from lane 1 |
+| 42 | Dashboard mock mode | **Live simulated laps.** The `run_mock` world in real time: a simulated robot drives 3 laps with random pillars through the same init → tracker → de-skewed re-check chain. Direction, start lane and seed are set in the panel, and Initialise restarts it. The truth is drawn faintly so verdicts can be checked |
+| 43 | Tuning panel groups | **All four:** LIDAR mount and calibration; initialisation thresholds; tracker and IMU; seat detector |
+| 44 | Extras beyond §10 | **A Save-run button** (start scan + IMU log in the `run_track --replay` format), **LIDAR health** (spin rate, time since the last return, backward steps), **de-skew stats** per lane. Not chosen: colouring the live scan by the old clustering |
+
+| 45 | Checkpoint C approval (§10.9 items 1–6) | **Approved, all items:** the display frame, the drawing, the panel, the runtime (Initialise / Re-initialise, loop order, stream, Save run), the tuning panel, mock mode |
+| 46 | P10 and P11 fixes (§10.7, §10.9 items 7–8) | **Approved, both:** frames judged at their end (late frames inside their window still count; frames the history doesn't fully cover are skipped), and the coverage check that turns an EMPTY with a hole in its window into UNKNOWN |
+
+All three checkpoints are approved: A (#34), B (#37, #39) and C (#45, #46). What is left is measuring and checking on the real robot (§11).
 
 ## 4. Conventions
 
@@ -214,7 +228,7 @@ Angles are clockwise. The robot frame is (f, s), with f = r·cos a ahead and s =
 4. **d_right / d_left = where the 90° / 270° ray meets that line.** This is still "the distance at 90° / 270°", now measured against the wall itself rather than whatever the single ray happens to hit.
 
 - No wall on a side gives UNDETERMINED.
-- **Lane-sum precondition** (pending approval): d_left + d_right must equal `config.LANE_WIDTH_MM` (rulebook 1000; set it to your field's width, decision #28) ± `LANE_WIDTH_TOLERANCE_MM` (40), otherwise UNDETERMINED.
+- **Lane-sum precondition** (pending approval): d_left + d_right must equal `config.LANE_WIDTH_MM` (rulebook 1000, decision #32) ± `LANE_WIDTH_TOLERANCE_MM` (100 mm, decision #32), otherwise UNDETERMINED.
 - The measurement uses raw returns, **not** `scan_processing` clusters, so the cluster corner-merge problem (P1, §6) cannot affect it.
 
 **Step 2 – Wall tilt.** This step was approved after the finding in §5.2.6.
@@ -298,7 +312,7 @@ The wrong cases are kept as a regression test, `test_previously_wrong_scenarios`
 ### 5.3 x: distance from the outer wall (`lane_init.measure_x`)
 
 - `d(90)` and `d(270)` come from the same side-wall lines as the gap test (step 1 above; the direction test's fits are passed on so both steps see exactly the same walls).
-- **Sanity check:** `|d(90) + d(270) − LANE_WIDTH_MM| ≤ LANE_WIDTH_TOLERANCE_MM (40)`, otherwise x is **rejected** with a reason, not trusted. In practice the gap test's identical precondition fails first.
+- **Sanity check:** `|d(90) + d(270) − LANE_WIDTH_MM| ≤ LANE_WIDTH_TOLERANCE_MM (100)`, otherwise x is **rejected** with a reason, not trusted. In practice the gap test's identical precondition fails first.
 - The sensor's distance to the outer wall is `x_sensor = d(90)` for CCW and `d(270)` for CW.
 - **Lever arm:** `x = x_sensor + h × LIDAR_OFFSET_LATERAL_MM`, with h = −1 for CCW and +1 for CW, and LATERAL positive to the robot's left.
   - Reasoning, CCW case: if the LIDAR is L to the left of the reference point, the reference point is L nearer the right-hand outer wall, so x_ref = x_sensor − L.
@@ -411,27 +425,49 @@ Other readings:
 #### 5.7.2 Why initialisation refused, and what changed
 
 1. **The 2° ray at 270° read the pillar** (166 mm), not the wall behind it, so d(90) + d(270) = 637. This is P6, fixed by decision #29 (step 1 above).
-2. **The lane is about 930 mm, not 1000**, so the ±40 mm lane-width check would refuse this field at any pose. Fixed by decision #28: `config.LANE_WIDTH_MM` is set to the field's width.
+2. **The lane is about 930 mm, not 1000**, so the ±40 mm lane-width check would refuse this field at any pose. First handled by decision #28 (a field-specific width), then replaced by decision #32: rulebook 1000 with a ± 100 mm margin (§5.7.4).
 
-With both changes and `LANE_WIDTH_MM = 930`, the same scan initialises:
+With the wall-line measurement, the rulebook lane width with its 100 mm margin (decision #32) and the measured sign (−1, decision #31), the same scan initialises:
 
 ```
-direction : CCW  -- gap on the LEFT: 809 mm open; right 0 mm; walls at -3.5 deg
-x         : 478 mm from the outer wall   (d90 478, d270 455, sum 933)
+direction : CW   -- gap on the RIGHT: 809 mm open; left 0 mm; walls at +3.5 deg
+x         : 478 mm from the outer wall   (outer wall on the left: d270 478, d90 455, sum 933)
 y         : 1464 mm   (front 1536 mm; the single 0-deg ray reads the pillar at 146 mm)
 seats     : all six UNKNOWN (blind wedge, dead zone, or behind the pillar ahead)
 ```
 
-#### 5.7.3 OPEN: the LIDAR angle sign
+#### 5.7.3 The LIDAR angle sign (measured) and the first scan's direction (confirmed)
 
-The scan puts the pillar beside the robot and the island opening on the **same** side (raw 270°). So two of the reported facts can't both hold:
+The first scan put the pillar beside the robot and the island opening on the **same** side (raw 270°). So "robot facing CCW" (island on the left) and "pillar on the right" couldn't both hold.
 
-- **Facing CCW** puts the island on the robot's **left**. Then raw 270° is left, `LIDAR_ANGLE_SIGN = +1` is correct, the answer above (CCW) is right, and the side pillar was on the left.
-- **Pillar on the right** makes raw 270° the right. Then `LIDAR_ANGLE_SIGN = −1`, the island was on the right, and the start was **CW**.
+The **sign-check scan** (`test_data/real_2026-09-23_sign_check.json`) settled the sign:
+- The robot was on the field **facing the inner (island) wall** about 400 mm away (owner, #34; the scan agrees: a finite wall about 400 mm ahead with rays passing both of its ends out to 1.2–2 m), with one object placed about 30 cm to its right, looking the way it faces.
+- The object read **raw 272°** (296 mm, about 45 mm wide).
+- With the LIDAR upside down, its raw angles run counter-clockwise, so **`LIDAR_ANGLE_SIGN = −1`** (decision #31). `test_real_scans.py` pins this: under the configured sign the object must read about 90°. It reads 87.7°.
+- Initialisation **refuses** this scan ("no side wall"), which is correct: facing a wall is not a lane start pose. The test pins that too.
+- The chassis wedge (raw 128–232°) and the zero offset are unaffected.
 
-Mounting upside down reverses the direction the sensor's angles run, so which sign is correct depends on the C1's native direction. That is not taken from a spec sheet. **The sign-check scan in §11 decides it.** Until then:
-- `config.LIDAR_ANGLE_SIGN` stays at +1.
-- `test_real_scans.py` asserts only what doesn't depend on the sign: the walls, the opening on the pillar's side, y, and that flipping the sign flips the answer and nothing else.
+Consequence for the first scan: raw 270° is the robot's **right**, so the island opening was on the robot's right, which is a **clockwise** start. The owner reported CCW. Every other reading of that scan agrees with the island being on the pillar's side:
+- a wall that ends and rays that pass beyond it
+- a continuous wall on the other side
+- a pillar sitting on the island wall's line past its end, where the next lane's seats are
+
+**Confirmed (decision #33):** asked which side the island was on in that first placement, the owner answered **the robot's right**. The start was CW, the earlier "CCW" was a mislabel, and every reading now agrees. `test_real_scans.py` is therefore a ground-truth test: CW, x ≈ 478 mm, y ≈ 1464 mm.
+
+#### 5.7.4 Rulebook measurements with margins (decision #32)
+
+The owner's instruction: use the rulebook positions and measurements with margins of error.
+
+- **Lane width:** `LANE_WIDTH_MM` = 1000 (rulebook). The margin `LANE_WIDTH_TOLERANCE_MM` goes from 40 to **100 mm**. This value is Claude's choice, pending approval, for these reasons:
+  - The practice field measured 926–934 mm, about 70 mm under, and passes with about 25 mm to spare.
+  - A side reading that *isn't* a wall is still refused. Seats stand 400 mm from either wall, so a pillar standing in for a wall is off by at least about 375 mm; anything seen through an opening is farther than the lane.
+  - The wall search's outer bound becomes 1100 mm.
+  - The simulated rulebook suites give identical results with 100 as with 40: still 0 wrong directions, 95% / 100% initialised in zones / lot.
+- **Seats:** rulebook positions (Fig. 11). The detector's existing margins are unchanged:
+  - range: 70 mm + 3% + 10 mm slack
+  - angle: 4° plus the pillar's own half-width
+  - UNKNOWN whenever it can't be sure
+- **Lane length / island:** rulebook (3000 / 1000). y still comes from the wall ahead, so a field whose island is longer than 1000 (as this one appears to be) doesn't affect x or y. It only affects whether the opening is found; it was: 809 mm.
 
 ## 6. Problems found in the existing code, and what happened to each
 
@@ -447,10 +483,16 @@ Mounting upside down reverses the direction the sensor's angles run, so which si
 | P4 | Lever arm and blind wedge had two independent settings, one in `config.py` and one in `DetectParams`. | Unified (§5.5), pending approval. |
 | P5 | The parallel-wall gap model can give the WRONG direction under 2°+ placement yaw when a pillar hides the opening (§5.2.6). | Tilt fit inside the gap test (decision #27). |
 | P6 | (Real scan) The 2° ray median at 90°/270° reads a pillar standing beside the LIDAR instead of the wall behind it. | Side walls measured as the farthest well-supported line within ±30° (decision #29). |
-| P7 | (Real scan) The practice field's lane is about 930 mm, and the code assumed the rulebook's 1000. | `config.LANE_WIDTH_MM` (decision #28). |
+| P7 | (Real scan) The practice field's lane is about 930 mm, and the code assumed the rulebook's 1000 ± 40. | Rulebook 1000 kept, margin widened to ± 100 mm (decision #32; `config.LANE_WIDTH_MM` remains a config value). |
+| P8 | (Real scans) `LIDAR_ANGLE_SIGN = +1` was wrong for the upside-down mount: every left/right would have been mirrored, and CW read as CCW. | Measured and set to −1 (decision #31). |
+| P9 | (Checkpoint B, new code) The entry re-check pairs a LIDAR frame, which is one ~100 ms revolution, with a single tracked pose. On a moving robot that gives 4.5% (600 mm/s) to 11% (1000 mm/s) wrong entry verdicts in simulation. | De-skew (decision #38, §9.11): **0 wrong** in the same simulation. Approved (#39). |
+| P10 | (Checkpoint B code, found testing C) While the robot turns, a sector at the LIDAR revolution's seam is seen by neither end of the revolution. A pillar standing there left a hole with the wall visible on both sides, which the seat detector read as EMPTY. | Coverage check in the entry re-check: an EMPTY whose search window contains a hole wider than the pillar becomes UNKNOWN (§10.7). Approved (#46). |
+| P11 | (Checkpoint B code, found testing C) A frame processed late was de-skewed to, and judged from, the robot's newest pose rather than the pose where the frame was taken. | Frames are judged at their end (the pose and window of that moment); late frames still count inside their window; frames not fully covered by the history are skipped (§10.7). Approved (#46). |
 | — | `mat_geometry.all_slots()` placed the 24 seats at 250/750 mm × 500/1500/2500 mm, which disagrees with Fig. 11 on all 24. | Deleted with the rest of the mat-level code (decision #24). |
 
-## 7. File-by-file changes (checkpoint A)
+## 7. File-by-file changes
+
+### 7.1 Checkpoint A
 
 **Deleted** (decision #24; recoverable from git history at `dd9c8f4`):
 
@@ -464,7 +506,7 @@ Mounting upside down reverses the direction the sensor's angles run, so which si
 - `lane_init.py`: the initialisation pipeline (§5.1, §5.3–5.6)
 - `run_init.py`: command-line review tool (§12)
 - `test_direction.py`, `test_init.py`, `test_lane_frame.py`: verification (§8)
-- `test_real_scans.py` + `test_data/real_2026-09-23_pillar_ahead_and_beside.json`: regression on the first real scan (§5.7), pending approval (A.2)
+- `test_real_scans.py` + `test_data/real_2026-09-23_pillar_ahead_and_beside.json` + `test_data/real_2026-09-23_sign_check.json`: regression on the real scans (§5.7), pending approval (A.2 / A.3)
 - `docs/CHANGES.md`: this document
 
 **Rewritten:**
@@ -502,7 +544,77 @@ Mounting upside down reverses the direction the sensor's angles run, so which si
 
 **Not runnable at this checkpoint:** `dashboard_server.py` and `templates/dashboard.html` still import the deleted modules and use the old conventions. They are rewritten at checkpoint C. Until then, `run_init.py` is the way to look at initialisation.
 
-## 8. Verification (checkpoint A)
+### 7.2 Checkpoint B
+
+**New:**
+
+- `stm32_link.py`: reads the STM32's `$IMU` lines over USB CDC in a background thread, validates them, keeps link statistics, logs raw lines for replay (§9.2)
+- `lane_tracker.py`: the tracker: pose integration, guards, turn rule, lane switch, entry re-check, events (§9.4–9.7)
+- `run_track.py`: command-line review tool with four modes, `--bench`, `--real`, `--replay-scan/--replay-imu` and `--sim` (§9.8, §12)
+- `test_stm32_link.py`, `test_lane_tracker.py`, `test_run_track.py`: verification (§8.2)
+- **P9 fix (#38):**
+  - `timing.py`: one time base for LIDAR returns and STM32 samples (`SweepClock`, `LinkClock`; §9.11.2)
+  - `deskew.py`: the pose history and the de-skew itself (§9.11.3)
+  - `measure_lidar_delay.py`: measures `LIDAR_TIME_OFFSET_S` on the robot, with record, replay and simulation modes (§9.11.4)
+  - `test_timing.py`, `test_deskew.py`, `test_lidar_delay.py`: verification (§8.2)
+
+**Modified:**
+
+- `config.py`: two new sections. The STM32 link: `IMU_PORT`, `IMU_BAUDRATE`, `IMU_STALE_S`, `IMU_YAW_SIGN = −1`, `ENCODER_TICKS_PER_CM = 14.853` (#36), `MAX_SPEED_MM_S`. The tracker: `TURN_MIN_DEG`, `TURN_GATE_Y_MM`, `TURN_FAILSAFE_DEG` (#25), `RECHECK_Y_MAX_MM`, `RECHECK_ALIGN_DEG` (#19, #26). The `MODE` comment mentions the simulated STM32.
+- `simulation.py`: motion and a simulated STM32 (§9.9): `LoopPath`, `SimStm32`, `random_lane_pillars`, `run_mock`. Everything from checkpoint A is unchanged. P9 fix:
+  - `run_mock` now casts each re-check frame as one real revolution of the spinning sensor on the moving robot (`lidar_sweep=True`, the new default).
+  - It stamps the STM32 lines and LIDAR returns with realistic arrival times, and de-skews (`deskew=True`).
+  - `lidar_stamp_error_s` simulates a mis-measured offset.
+- P9 fix, other files:
+  - `config.py`: `DESKEW_HISTORY_S = 0.5` and `LIDAR_TIME_OFFSET_S = 0.0` (to be measured).
+  - `lane_tracker.py`: an odometry pose history (timed with `LinkClock`); `on_lidar_frame(points, times)` de-skews the frame when times are given; de-skew counters per lane.
+  - `scan_processing.py`: `clean_and_project_timed` keeps each return's time. The filtering and calibration are shared with `clean_and_project`, which is unchanged.
+  - `run_track.py`: `--real` hands the re-check timed frames. `--sim` gained `--speed`, `--no-sweep`, `--no-deskew` and `--stamp-error-ms`.
+- `lidar_source.py` (P9 fix). Each bucket now also stores its return's unwrapped sweep angle and arrival time, fed to a `SweepClock`. New methods:
+  - `get_latest_scan_timed()`: the table with each return's measurement time
+  - `get_points_since(t)`: every return of the last ~4 s, for recordings
+  - `timing_status()`
+
+  `get_latest_scan()` returns exactly what it did before, so initialisation and `run_init.py` are unaffected.
+- `docs/CHANGES.md`: this document
+
+**Unchanged:**
+
+- `requirements.txt`: already lists `pyserial`, which `stm32_link.py` needs on the Pi.
+- `dashboard_server.py` and `templates/dashboard.html`: still not runnable. They are rewritten at checkpoint C.
+
+### 7.3 Checkpoint C
+
+**New:**
+
+- `display.py`: the fixed full-loop frame (§10.1)
+- `live_sim.py`: mock mode's real-time simulated hardware (§10.6)
+- `test_display.py`, `test_dashboard.py`: verification (§8.3)
+- `docs/dashboard_mock_lap.png`, `docs/dashboard_before_init.png`: screenshots
+
+**Rewritten:**
+
+- `dashboard_server.py`: the runtime, routes and tuning registry (§10.4, §10.5). Nothing of the old mat-view server is left; it imported the deleted modules.
+- `templates/dashboard.html`: the page (§10.2, §10.3)
+
+**Modified:**
+
+- `lane_tracker.py`:
+  - P11: the pose history also stores the lane pose; frames are judged at their end; late frames still count inside their window; `frames_skipped_old` and `frozen_t`
+  - P10: `_coverage_check` and the `empty_downgraded` counter
+  - for the dashboard: `last_sample` and `deskew_view()`
+- `deskew.py`: `PoseHistory` carries the lane pose and has `lane_pose_at()`; `deskew(..., t_ref=)` de-skews to any time in the history; `FRAME_SPAN_S`
+- `simulation.py`: `make_world()` and `cast_revolution()` shared with `live_sim.py` (`run_mock`'s results unchanged); `run_mock(lidar_delay_s=)` hands frames to the tracker late
+- `run_track.py`: `--real` reads the LIDAR frame before taking the STM32 samples (§10.7)
+- `lidar_source.py`: `timing_status()` also gives the age of the last return
+- `test_lane_tracker.py`: late-frame rows in the de-skew table, and `test_coverage_hole`
+- `test_run_track.py`: the harness compares the pose each frame is judged from (at its end) with the truth; its truth timeline follows the STM32's own schedule
+- `README.md`: the banner now says tracking and the dashboard are done, not "in progress"
+- `docs/CHANGES.md`: this document
+
+## 8. Verification
+
+### 8.1 Checkpoint A
 
 All five suites pass (`test_lane_frame.py`, `test_seat_occupancy.py`, `test_direction.py`, `test_init.py`, `test_real_scans.py`). The numbers below are after A.2. Every simulated-world suite pins `LANE_WIDTH_MM = 1000` (rulebook), whatever `config.py` says.
 
@@ -550,14 +662,15 @@ Test-world assumptions shape only the scenarios, not the code:
 | seat verdicts, end to end | 4644 verdicts: 688 present, 1941 absent, 2015 unknown (43%); **0 false present, 0 false absent** |
 | placement yaw (info) | ±1 / 2 / 3°: x within 1.6 mm; y within 7 / 20 / 39 mm; 0 wrong seats |
 
-**`test_real_scans.py`** (your 23 Sept scan, `LANE_WIDTH_MM = 930`)
+**`test_real_scans.py`** (your 23 Sept scans; rulebook 1000 ± 100, measured sign −1)
 
 | Test | Result |
 |---|---|
-| walls behind the side pillar | 455 / 478 mm (the 2° ray reads the pillar at 166 mm) |
+| sign check (robot facing the inner wall) | the object placed on the robot's right reads 87.7° at 296 mm with sign −1; initialisation refuses (not a lane start pose) |
+| walls behind the side pillar | 478 / 455 mm (the 2° ray reads the pillar at 166 mm); lane 933 mm, within the margin |
 | opening | 809 mm on the pillar's side, 0 on the other |
 | y | 1464 mm (the 0° ray reads the pillar at 146 mm) |
-| sign mirror | flipping `LIDAR_ANGLE_SIGN` flips CCW ↔ CW and changes nothing else. The absolute answer waits on §5.7.3. |
+| direction | **CW** (owner-confirmed), x = 478 mm. Flipping the sign flips CCW ↔ CW and nothing else. |
 
 **`test_seat_occupancy.py`** (existing suite, new conventions)
 
@@ -572,99 +685,682 @@ Test-world assumptions shape only the scenarios, not the code:
 | lever arm, CW and CCW | 6/6 with the offset declared |
 | pose-error budget | clean up to 50 mm / 2° |
 
-## 9. Checkpoint B: agreed design (not implemented)
+### 8.2 Checkpoint B
 
-### 9.1 STM32 → Pi message (decisions #13, #17, #18)
+All eleven suites pass: the five from 8.1, plus `test_stm32_link.py`, `test_lane_tracker.py` and `test_run_track.py`, plus `test_timing.py`, `test_deskew.py` and `test_lidar_delay.py` for the P9 fix.
 
-The STM32 enumerates as USB CDC, `/dev/ttyACM*`; the baud rate is ignored. It sends one ASCII line per sample at 100 Hz, `\n`-terminated:
+The simulated runs use the ground truth of an independent world. The robot follows a `LoopPath`: a rounded square 500 mm from the outer wall, with 400 mm corner radius and a ±50 mm weave on the straights, at 600 mm/s. `SimStm32` turns that motion into `$IMU` lines. The chip's yaw has its own zero (37°) and the owner's sign, plus 0.15° noise and 0.01°/s drift; the encoder counts whole ticks at 14.853/cm. Each lane gets 1–2 pillars on rulebook seats. The tracker never sees the truth; the harness compares afterwards.
+
+**`test_stm32_link.py`**
+
+| Test | Result |
+|---|---|
+| parser | The agreed line parses; 8 malformed forms (empty, wrong prefix, 3 or 6 fields, non-numeric, `nan`, negative seq) are rejected, each with a reason |
+| assembler | Lines split across reads are rejoined; 5 kB without a newline is dropped and reported, not buffered forever |
+| end to end through a real pseudo-terminal | 100 lines written in 37-byte chunks (so lines split mid-way), with a partial first line, one garbage line and one line lost. Result: the 99 samples arrive in order, the partial first line is ignored, the garbage is counted as 1 bad line, the lost line as 1 seq gap, and the log replays the same 99 samples |
+| open failure | A port that can't be opened is reported in `status()["error"]`, not silently ignored |
+
+**`test_lane_tracker.py`**
+
+| Test | Result |
+|---|---|
+| straight line, handedness | y increases by exactly the distance driven. Heading right moves x toward the outer wall for CCW (−35 mm) and toward the island for CW (+35 mm), as x is measured from the outer wall |
+| yaw wrap | Chip yaw crossing ±180° six times leaves the heading unchanged |
+| turn rule, 12 cases, both directions | Swerves of 40° and 60° before the island ends and turns against the round direction are ignored. 50° past y = 2000 and the 85° failsafe each switch lanes exactly once |
+| starting heading from the wall fit (#35), both directions | ψ0 = +3.50° (truth +3.50°). Over 2 m, x drifts 0.0 mm; starting from ψ0 = 0 would give 122 mm |
+| glitch and restart | A 500 mm encoder jump and an STM32 restart (seq going backwards) are logged and not integrated; tracking continues from the kept pose |
+| end to end: 32 runs × 3 laps | Both directions, all 4 start lanes, with variants for 2° placement yaw, 5% lines lost, and 1% encoder error. The LIDAR frames are real revolutions, de-skewed. Every run: 12/12 turns and 3 entry re-checks (lap 1, lanes 2–4). **0 wrong seats**; the entry re-checks decided 535 and left 41 unknown (93% decided; 539 / 37 before P10's coverage check). Tracked vs true position: median 8.5 mm, worst 26.8 mm |
+| de-skew end to end (P9) | See the table below |
+
+**P9, the entry re-check with a real sweep** (`test_deskew_end_to_end`: lap-1 re-checks, 16 runs, 288 verdicts per cell)
+
+| LIDAR frames | 600 mm/s | 1000 mm/s |
+|---|---|---|
+| instantaneous (the old test model) | 0 wrong | 0 wrong |
+| one real 100 ms revolution, **no** de-skew | **13 wrong** | **32 wrong** |
+| real revolution, **de-skewed**, offset right (required: 0 wrong) | **0 wrong** | **0 wrong** |
+| de-skewed, offset measured 10 ms too high / too low | 1 / 0 wrong | 0 / 0 wrong |
+| de-skewed, offset measured 30 ms too high / too low | 0 / 0 wrong | 9 / 5 wrong |
+| de-skewed, every frame 250 ms late (P11; required: 0 wrong) | **0 wrong** | **0 wrong** |
+| de-skewed, every frame 450 ms late (required: 0 wrong) | 0 wrong, all 288 UNKNOWN (frames skipped) | same |
+
+So the offset has to be known to about ±10 ms. (Figures after P10's coverage check; at 1000 mm/s the de-skewed rows leave about 40 of 288 unknown.) `measure_lidar_delay.py` measures it to within 2 ms in simulation (below).
+
+**`test_run_track.py`** (the hardware paths of `run_track.py`)
+
+pyserial and rplidarc1 are replaced by stubs.
+
+- The serial stub reads a real pseudo-terminal that a feeder writes `$IMU` lines into, in real time at 100 Hz.
+- The LIDAR stub's `get_latest_scan_timed()` returns one real 100 ms revolution. Each ray is cast from the robot's true pose at the real `time.monotonic()` time it was measured, and carries that time. So the de-skew runs on real clocks, with the STM32 side timed through the real reader thread and `LinkClock`.
+- Everything else is the real code.
+
+Each scenario runs in its own process, about 10 s each.
+
+| Test | Result |
+|---|---|
+| `--bench` | Robot still for 1 s, turned 90° clockwise, rolled 500 mm. The display reads heading **+90.00°** and distance **500.2 mm** (whole ticks) |
+| `--real`, robot still until tracking starts, then 1 lap at 1000 mm/s | 4/4 turns. Init plus entry re-checks: 21 decided, 3 unknown, **0 wrong**. Every re-check frame (13–28 per run, depending on machine load) was a real sweep and was de-skewed, with returns moved by up to about 550 mm. The pose each frame was judged from (the tracked pose at the frame's end, §10.7) was within about 12 mm and 1.7° of the truth. The degree figure includes the test feeder falling behind its schedule under load |
+| `--real`, robot drives off as soon as the start scan is taken, with initialisation slowed to 0.8 s | The robot is already 800–820 mm down the lane when the tracker is created. Still 4/4 turns and **0 wrong**, with every frame de-skewed and the judged pose within about 12 mm / 1.7°: the motion during initialisation is not lost (§9.10, item 1) |
+| `--replay-scan/--replay-imu` of the files the run above saved | The replay starts at the sample that was current at the scan (seq saved in the dump) and reproduces the live run's 4 turns identically |
+
+**`test_timing.py`** (the time base the de-skew relies on)
+
+| Test | Result |
+|---|---|
+| `LinkClock` | STM32 lines arrive with exponential USB/thread jitter (mean 2 ms). Mapped times come out within 0.00 ms of sample time + the smallest delay. An STM32 restart is followed; a sample without an arrival time uses the STM32 clock |
+| `SweepClock`, returns trickling in (3 ms + 0–2 ms jitter) | Each return's time is within 0.01 ms (99%) of measurement time + smallest delay. Arrival stamps alone: up to 2 ms off |
+| `SweepClock`, bursts every 30 ms | Within 0.29 ms. Arrival stamps alone: up to 29.8 ms off |
+| `SweepClock`, bursts every 50 ms, spin drifting 10 → 10.3 Hz | Within 0.51 ms. Arrival stamps alone: up to 49.8 ms off |
+| `SweepClock`, abrupt spin step 10 → 11 Hz (INFO) | Up to 2.7 ms off for the next 1 s (one window), then within 0.21 ms |
+| `SweepClock`, less than one revolution of data | No fit yet: arrival times are used |
+| `lidar_source` end to end, stand-in rplidarc1 | Real time, 10 Hz, bursts every 40 ms. Every return's time = measurement + 7.1–7.3 ms (a constant, which `LIDAR_TIME_OFFSET_S` absorbs), within 0.05 ms (99%). Arrival stamps alone spread over 38–42 ms. Spin measured 10.01 Hz |
+
+**`test_deskew.py`** (against independent geometry)
+
+| Test | Result |
+|---|---|
+| 400 returns over one 100 ms revolution | On a 600 mm/s, 60°/s arc, with a 110 mm ahead / 60 mm left lever arm: up to 369 mm off the end-pose view before the de-skew, **0.008 mm** after. Moving the odometry frame's origin changes nothing |
+| limits | Returns at the end time are unchanged. The offset shifts stamps exactly. Returns older than the history are dropped. One measured 8 ms after the newest pose is extrapolated: 21.8 mm off → 0.10 mm |
+
+**`test_lidar_delay.py`** (`measure_lidar_delay.py`)
+
+| Test | Result |
+|---|---|
+| simulated hand-turned recordings (±30° at 0.7 Hz for 10 s) | Clocks on unrelated zeros, USB jitter, LIDAR bursts every 25 or 50 ms or one by one, with and without a lever arm. True offsets of +13, −20 and +30 ms are recovered within **0.3 ms**; with the robot's centre wandering 20 mm unseen, within 1.6 ms |
+| robot hardly turned (±1°) | Reported **NOT RELIABLE** |
+| `--real`'s recording path, end to end in real time | Stand-in STM32 (pseudo-terminal) and stand-in rplidarc1 (bursts), both driven by the same simulated robot on the real clock. About 1500 STM32 lines and 77,000 returns recorded; measured offset +3.7 to +4.0 ms against an actual +4.1 ms (two runs). The saved file replays to the same value |
+
+**Accuracy over 3 laps** (22.1 m per run; 8 runs per row: both directions, 4 start lanes; `simulation.run_mock`. Re-run with the real-sweep, de-skewed LIDAR frames: the numbers are identical, because the LIDAR only feeds the seat re-check, never the pose)
+
+| Condition | Turns | Position error, median per run | Worst | At the end | Wrong seats |
+|---|---|---|---|---|---|
+| baseline | 12/12 | 2.9–11.1 mm | 19.9 mm | 7.5 mm | 0 |
+| placement yaw 3.5° | 12/12 | 8.6–48.3 mm | 54.6 mm | 54.5 mm | 0 |
+| encoder calibration 2% off | 12/12 | 26.2–32.4 mm | 49.3 mm | 7.7 mm | 0 |
+| 5% of STM32 lines lost | 12/12 | 3.5–16.7 mm | 38.1 mm | 7.6 mm | 0 |
+| yaw drift 0.1°/s (10× the baseline) | 12/12 | 24.9–45.5 mm | 84.7 mm | 67.4 mm | 0 |
+
+What the rows show:
+
+- **Placement yaw:** the error comes from initialisation, not tracking. With yaw taken as 0 (#4), y at 3.5° is up to 47.6 mm off, and tracking carries it forward because nothing after initialisation corrects the pose (item 4 of the brief). §9.12.
+- **Encoder calibration error does not accumulate over laps.** At each turn, the old lane's y becomes the new lane's x, and its x becomes the new y (§9.6). So along-track error from one lane turns into lateral error in the next, and is then replaced; it never builds up beyond about one lane's worth.
+- **Heading drift does accumulate.** It is the one error that grows with time.
+
+### 8.3 Checkpoint C
+
+All thirteen suites pass: the eleven from 8.1 and 8.2, plus `test_display.py` and `test_dashboard.py`. `test_lane_tracker.py` also gained `test_coverage_hole` and the late-frame rows.
+
+**`test_display.py`**
+
+| Test | Result |
+|---|---|
+| lanes fill the loop | Lane 1 travels up the right strip (CCW) or left strip (CW); lanes 2–4 fill the top, far side and bottom in driving order; each lane's +y is its drawn direction of travel |
+| turns are seamless | 3200 poses re-expressed at a turn by `corner_transform`: same screen point (worst 2.3 × 10⁻¹³ mm) and heading |
+| mock truth lines up | 8 start cases × 4 lanes: the global-frame truth lands where the tracker's lane coordinates are drawn (worst 2.5 × 10⁻¹³ mm); headings agree |
+| robot frame | (forward, right) vectors go where the robot faces |
+
+**`test_dashboard.py`** (Flask's test client; mock mode in real time at 4×)
+
+| Test | Result |
+|---|---|
+| mock, end to end | Before Initialise: not tracking, with the live scan robot-centred. Then CW, start slot 1, 3 laps: lanes appear one per turn (1 → 4), 12 turns, seat verdicts all agree with the truth, and the drawn robot stays within about 7 mm of the true one. The stream serves the state; `/api/static` has the init scan and truth pillars; Save run's files replay through `run_track.py` to the same 12 turns; Re-initialise starts over at lane 1. Bad mock settings are refused |
+| tuning | 4 groups and 42 parameters, each with its meaning and when it applies. Bad values (out-of-range sign, text, `nan`, unknown name) are refused; a live seat-detector edit reaches the running tracker; changed values are flagged; Reset restores `config.py` |
+| lagging loop (P10/P11) | The dashboard loop replayed deterministically, 40 runs, with up to 0.5 s between LIDAR reads and up to 0.3 s lag before the STM32 samples are taken: **about 420 entry verdicts, 0 wrong**. With the coverage check off: 8 wrong in 509 |
+| real mode with stand-in hardware | STM32 through a pseudo-terminal, and a stand-in LIDAR giving real-sweep timed frames on the real clock. The STM32 link is live before Initialise; then 1 lap at 1000 mm/s: 4 turns, 4 lanes, about 20 verdicts, **0 wrong**, not stale |
+
+**Also run:** a headless Chromium (Playwright) against the mock server. The page loads with no console errors, and the screenshots above are from it: before Initialise, during lap 1, after a lap, the tuning panel open, and a 400 px phone width.
+
+## 9. Checkpoint B: the IMU tracking mechanism
+
+Implemented to the agreed design (decisions #13–#20, #23, #25, #26, #35, #36) and **approved (#37)**. The fix for P9, the de-skew (#38, §9.11), is **approved (#39)**.
+
+Data flow after initialisation:
+
+```
+STM32 ──USB CDC──> stm32_link.Stm32Link ──ImuSample──> lane_tracker.LaneTracker ──> pose (x, y, ψ), lane, lap,
+ (BNO08x yaw,        reader thread, parser,               integration, guards,          seats per lane, events
+  hall encoder)      stats, raw-line log                  turn rule, lane switch
+                                                                  ▲
+RPLIDAR C1 ──> lidar_source ──> clean_and_project_timed ──> deskew ┘ (entry re-check only, lap 1, lanes 2–4)
+                (+ SweepClock times)                     (pose history, LinkClock times)
+```
+
+### 9.1 The STM32 → Pi message (decisions #13, #17, #18)
+
+The STM32 enumerates as USB CDC, so it appears as `/dev/ttyACM*` and the baud rate is ignored. It sends one ASCII line per sample at 100 Hz, `\n`-terminated (a trailing `\r` is tolerated):
 
 ```
 $IMU,<seq>,<t_ms>,<enc>,<yaw>
 seq   uint32  +1 every line (the Pi counts dropped lines)
 t_ms  uint32  STM32 HAL_GetTick() when sampled
 enc   int32   cumulative hall-encoder count since power-on, forward = +, never reset
-yaw   float   BNO08x Game Rotation Vector yaw, degrees, 2 decimals, as the chip reports it
+yaw   float   BNO08x Game Rotation Vector yaw, degrees, as the chip reports it
 e.g.  $IMU,1042,10420,15873,-12.37
 ```
 
-- A cumulative encoder count means a lost line loses no distance.
-- Game Rotation Vector uses no magnetometer, so the motor's magnetic field can't disturb it.
+- The encoder count is cumulative, so a lost line loses no distance: the next line carries it.
+- Game Rotation Vector uses no magnetometer, so the drive motor's magnetic field can't pull the heading.
+- The STM32 firmware is not in this repository. The Pi side expects exactly this format.
 
-### 9.2 Pi side
+### 9.2 Reading the link (`stm32_link.py`)
 
-New config values:
+**`parse_line(line)`** returns `(ImuSample, "")` or `(None, reason)` and never raises. A line is accepted only if all of these hold:
 
-- `IMU_PORT`, default `/dev/ttyACM0` (confirm; prefer `/dev/serial/by-id/…`)
-- `IMU_YAW_SIGN`
-- `ENCODER_MM_PER_COUNT`
+- after stripping whitespace it starts with `$IMU` and has exactly 5 comma-separated fields
+- seq, t_ms and enc are integers, and yaw is a finite float
+- seq ≥ 0 and t_ms ≥ 0
 
-The mechanism:
+Each rejection carries its reason (e.g. `"4 fields, expected 5"`), which `status()` shows with the start of the offending line.
 
-- A reader thread parses and validates lines, and counts dropped and garbled ones.
-- `heading = IMU_YAW_SIGN × yaw`, unwrapped, minus its value at initialisation, plus 0 (init yaw).
-- `dist = (enc − enc_at_init) × ENCODER_MM_PER_COUNT`.
-- For each sample, with `ds` the distance moved and `ψ` the mean heading of the step, relative to the current lane's grid north:
-  - `y += ds·cos ψ`
-  - `x += ds·sin ψ · (−1 for CCW, +1 for CW)`, since x is measured from the outer wall.
+**`LineAssembler`** turns bytes into lines. A read can end mid-line, so the partial line is kept until its newline arrives. If 4 kB accumulate without a newline, the buffer is dropped and one bad line is reported, so garbage can't grow memory forever.
 
-### 9.3 Turn rule (decisions #14, #25)
+**`Stm32Link`** is a background reader with the same shape as `lidar_source.RPLidarC1Source`: `start(log_path=None)`, `stop()`, `is_alive()`, `drain()`, `status()`.
 
-`ψ` is the heading relative to the current lane's grid north. A turn is made when either condition holds:
+- **Opening the port** happens in exactly one place, `_open_serial`: `serial.Serial(port, 115200, timeout=0.05)` from pyserial, imported only there. If the open fails (wrong port, permissions, pyserial missing), the error is stored in `status()["error"]` and printed; nothing fails silently.
+- **Reading:** takes whatever bytes are waiting, feeds the assembler, and parses each complete line.
+  - The first line after connecting is usually a fragment. If it doesn't parse, it is dropped without counting it as bad.
+  - Every accepted sample is stamped with `rx_time`, the Pi's `time.monotonic()` on arrival, and queued.
+- **`drain()`** returns every sample that arrived since the previous call, in arrival order.
+- **Statistics:** lines accepted and rejected, the last rejection reason, seq gaps (lost lines, counted from seq jumps), seq resets (seq going backwards, i.e. the STM32 restarted), and the arrival rate over the last second.
+- **Staleness:** `status()["stale"]` is true when no line has arrived for `IMU_STALE_S` (0.2 s).
+- **Stopping:** a read error after `stop()` (the port closing under the reader) is not reported as an error. Any other read error is stored and printed.
+- **Log:** `start(log_path=…)` writes every raw line received to a file. The file is **overwritten**, like the `--dump` scan it is replayed with, so one log is always one run (§9.10, item 3). `read_log(path)` reads it back for replay, rebuilding `rx_time` from `t_ms`.
 
-- **Primary:** ψ has rotated **≥ 45° toward the round direction** (left for CCW, right for CW) **and** tracked **y ≥ 2000**, which means past the island's end, in the corner square.
-- **Failsafe:** **≥ 80°** alone.
+### 9.3 Units and calibration (decision #36)
 
-Turns against the round direction are ignored. All thresholds are config values.
+- **Heading:** `IMU_YAW_SIGN = −1`, because "IMU clockwise reads negative". The tracker works clockwise-positive, so every yaw step is multiplied by −1.
+- **Distance:** `ENCODER_TICKS_PER_CM = 14.853`, so one tick is 10 / 14.853 = **0.6733 mm**.
+- **Validation:** the tracker refuses to start if `IMU_YAW_SIGN` isn't ±1 or `ENCODER_TICKS_PER_CM` isn't positive.
+- **Bench check:** both values can be checked by hand with `run_track.py --bench` (§11).
 
-- **Why the y gate:** a car can't be 45° into a turn toward the island before the island ends. The gate also blocks false turns during the final parking manoeuvre in the start section.
-- **Why switching late costs nothing:** switching frames is an exact change of coordinates (§9.4). The only real risk is a false turn.
+### 9.4 The tracker (`lane_tracker.py`)
 
-### 9.4 Lane switch (`lane_frame.corner_transform`, already written; checked by `test_lane_frame.py`)
+**State**, always in the current lane's frame (§4.2):
+
+- **x:** distance from the outer wall
+- **y:** distance along the lane from the wall behind
+- **ψ:** heading relative to the lane's grid north, clockwise positive
+- **`lane_index`:** 0 = the start lane, +1 per turn. Derived from it: `slot = lane_index mod 4` (0 = start lane, then 1, 2, 3 in driving order) and `lap = lane_index div 4 + 1`.
+
+**Start (decision #35):**
+
+- x and y come from initialisation.
+- **ψ0 = −(wall angle)**, where the wall angle is the lane direction in the robot frame that the gap test's wall fit measured (§5.2.6). The walls appear rotated the opposite way to the robot, hence the minus sign.
+  - This seeds the tracker's heading only. Initialisation's own x, y and seats keep yaw 0 (#4).
+  - Why it matters: a 3.5° placement yaw tracked as 0° would put x off by 122 mm after 2 m (`test_start_heading_from_wall_fit`).
+- **The references** are the STM32 sample that was current when the start scan was taken (§9.8).
+- **The start lane's seats** are initialisation's verdicts, marked `source = "init"`.
+
+**Each STM32 sample:**
 
 ```
-new_y   = old_x
-new_x   = 3000 - old_y
-new_yaw = old_yaw + 90   (CCW)   |   old_yaw - 90   (CW)
+heading += IMU_YAW_SIGN × wrap180(yaw − yaw_prev)          unwrapped, so ±180 crossings don't jump
+ds       = (enc − enc_prev) × 10 / ENCODER_TICKS_PER_CM    mm, forward +
+ψ        = wrap180(heading − lane_north)
+ψ_mid    = the midpoint of ψ over the step
+y += ds × cos ψ_mid
+x += ds × sin ψ_mid × (−1 for CCW, +1 for CW)
 ```
 
-The corner square is shared by both lanes. The new lane's wall behind is the old lane's outer wall, and its outer wall is the old lane's wall ahead. The same formula holds for both directions because x is always measured from the outer wall.
+The sign on x comes from the frame. For CCW the outer wall is on the right, so turning right (ψ > 0) moves toward it and x (the distance from it) shrinks. For CW the outer wall is on the left, so turning right moves away from it.
 
-### 9.5 Entry-corner seat re-check (decisions #15, #19, #20, #23, #26)
+**Guards.** Neither guard moves the tracked position; each logs an event.
 
-- **Lap 1, lanes 2–4:** after the lane switch, on every LIDAR frame while tracked y < 1000 **and** |ψ| ≤ 20°, run the seat check with the IMU-tracked pose, **including its yaw**. The first decided verdict per seat is kept; later frames only fill unknowns. Verdicts freeze at y ≥ 1000.
-  - Why the ±20° gate: a snapshot spans up to one rotation of the LIDAR, and mid-turn the robot can rotate about 9° within it, more than the detector's 4° margin.
-- **Start lane:** init result only, all run.
-- **Laps 2–3:** no re-check; the lap-1 result is kept.
+- **seq not increasing** (the STM32 restarted, or a repeated line): nothing is integrated and the references are re-based on the new sample. A restarted STM32 starts its encoder at 0 and its yaw at a new zero, so re-basing lets tracking continue from the kept pose. Motion during the restart itself is lost.
+- **Encoder step faster than `MAX_SPEED_MM_S` (3000 mm/s) + 50 mm** over the step's `t_ms` interval: the distance is discarded (a glitch), and the heading step is still applied. After lost lines the interval is longer, so a legitimate catch-up isn't flagged.
 
-### 9.6 Mock mode
+**Path:** a point `(lane_index, x, y)` is recorded every 20 mm and at every lane change, for the checkpoint C dashboard.
 
-The simulator gains a motion model (driving along lanes, arcing through corners) and a simulated STM32 that emits the same `$IMU` lines through the same parser. It adds encoder and yaw noise, so the whole chain runs end to end: init, tracking, turn, new lane, re-check.
+### 9.5 The turn rule (decisions #14, #25)
 
-## 10. Checkpoint C: agreed design (not implemented)
+```
+toward = −ψ (CCW: turns are to the left) | +ψ (CW: turns are to the right)
+turn when   (toward ≥ TURN_MIN_DEG (45) and y ≥ TURN_GATE_Y_MM (2000))
+       or    toward ≥ TURN_FAILSAFE_DEG (80)
+```
 
-Decisions #16, #21 and #22.
+- Turns against the round direction never trigger.
+- The rule is checked after every sample.
+- **Why the y gate:** a car can't be 45° into a turn toward the island before the island ends (y = 2000). The gate also blocks a false turn during the final parking manoeuvre in the start section.
+- **Why switching late costs nothing:** the switch is an exact change of coordinates (§9.6). The only real risk is a false turn, which the gate prevents.
+- In simulation the switch happens at ψ ≈ 45.5° and y ≈ 2360–2400 on every turn.
 
-- **Canvas:** a fixed full-loop frame (3000 × 3000). Lane 1 is drawn with travel up the screen, at the spot it will hold when the loop closes: the right edge for CCW, the left edge for CW. Undriven lanes stay blank. Each turn adds the next lane (full 1000 × 3000) in its place, until the lap is drawn. Nothing rescales.
-- **Per lane:** walls; the 6 seats in 3 states, with where each verdict came from (init or entry re-check).
-- **Overlays:** robot marker, IMU-traced path, the frozen init scan on lane 1, the live scan drawn at the IMU-tracked pose.
-- **Panel:**
-  - initialisation results: direction with both openings, x / y with their raw readings, seat table with reasons
-  - tracker: lane number, lap, x, y, ψ
-  - IMU status: port, rate, dropped lines, raw yaw / encoder
-  - trimmed tuning panel and re-initialise button
-- **Removed:** mat view, start candidates, predicted overlays, broadside panel, convention-warning box.
+### 9.6 The lane switch (`lane_frame.corner_transform`)
+
+```
+new_y = old_x
+new_x = 3000 − old_y
+lane_north += −90 (CCW) | +90 (CW)      →  ψ = wrap180(heading − lane_north), i.e. ψ ± 90
+lane_index += 1
+```
+
+The corner square belongs to both lanes. The new lane's wall behind is the old lane's outer wall, and the new lane's outer wall is the old lane's wall ahead. The same formula holds in both directions because x is always measured from the outer wall. `test_lane_frame.py` checks it against global geometry: 0 mm, 5.7 × 10⁻¹⁴°.
+
+**Consequence for errors (§8.2):** after a switch, y is the old x and x is 3000 − the old y. An along-track error from one lane (encoder calibration) becomes a lateral error in the next and is then replaced, so it doesn't build up over laps. Heading error does build up.
+
+### 9.7 Seats per lane and the entry re-check (decisions #15, #19, #20, #23, #26)
+
+- **Slot 0 (the start lane):** initialisation's verdicts, on every lap.
+- **Slots 1–3 on their first visit (lap 1):** a turn into a lane that has no record yet creates one (`source = "entry"`, all six seats unknown) and opens the re-check (`wants_lidar` becomes true).
+  - For each LIDAR frame while it is open:
+    - If |ψ| > `RECHECK_ALIGN_DEG` (20°), the frame is skipped and counted (`frames_skipped_align`).
+    - Otherwise the frame is first **de-skewed** to the current pose (§9.11). Then `seat_occupancy.detect_seat_occupancy(frame, x, y, direction, robot_yaw_deg = ψ)` runs with the tracked pose, including the IMU heading, and the config lever arm and blind wedge. The frame is counted (`frames_used`).
+  - For each seat still unknown, the frame's verdict is taken if it is present or absent. **The first decided verdict per seat is kept.** Later frames only fill unknowns.
+  - The re-check **freezes** when y ≥ `RECHECK_Y_MAX_MM` (1000), or at the next turn if that comes first. A `recheck_frozen` event reports how many seats were decided and from how many frames.
+- **Later visits (laps 2 and 3):** no record is created and no re-check runs; the lap-1 result stands.
+
+Typical numbers in `run_mock` (10 Hz frames, 400 mm corner radius, 600 mm/s): the new lane starts at y ≈ 620. About 3 frames are skipped while the robot is still more than 20° off the lane axis, and about 4 are used before y = 1000. 93% of seats are decided. `run_track.py --real` reads a frame on every loop, every 20–50 ms, so it gets more frames, though they overlap.
+
+### 9.8 The review tool (`run_track.py`)
+
+Four modes:
+
+- **`--bench [--log FILE]`:** STM32 only. Shows raw yaw, heading (sign applied), raw encoder, distance (scale applied), rate, gaps and bad lines. Used for the two calibration checks in §11.
+- **`--real [--log FILE] [--dump FILE]`:** the whole chain on the robot.
+  1. Open the STM32 link and wait up to 3 s for samples.
+  2. Start the LIDAR and wait until the scan has at least 300 returns (up to 5 s).
+  3. Take the newest STM32 sample **at that moment**. It is the tracker's starting reference; everything older is discarded, and nothing after it is dropped or fed twice.
+  4. Save the dump if asked. It includes `imu_seq_at_scan`, that sample's seq.
+  5. Initialise. On failure, print the reason and stop.
+  6. Track. Every loop takes all new STM32 samples. While `wants_lidar`, it also takes the latest LIDAR frame **with each return's measurement time** (`get_latest_scan_timed` → `clean_and_project_timed`), which the tracker de-skews (§9.11). It prints events as they happen and a status line twice a second (lane, slot, lap, x, y, ψ, RE-CHECK, link rate, gaps, STALE).
+  7. Ctrl-C prints the seat table per lane.
+
+  Because the reference is taken at the scan, motion that starts while initialisation is still computing is counted (§9.10, item 1). Motion during the scan itself spoils the scan, so the robot must stand still until the initialisation report appears.
+- **`--replay-scan FILE --replay-imu FILE`:** re-runs initialisation on the saved scan and replays the logged samples from `imu_seq_at_scan` onwards. It reproduces a live run's turns and poses exactly. Entry re-checks can't be replayed, because only the start scan is saved.
+- **`--sim`:** the simulated end-to-end run (§9.9), with the truth printed beside every seat and the position, heading and initialisation errors.
+  - The LIDAR frames are real revolutions, de-skewed.
+  - `--no-sweep`, `--no-deskew` and `--stamp-error-ms` show the alternatives, and `--speed` changes the speed.
+
+### 9.9 Simulation (`simulation.py`, decision #12)
+
+- **`LoopPath(direction)`:** the robot's true path in global coordinates.
+  - A rounded square 500 mm from the outer wall (the lane centreline), with a 400 mm corner radius.
+  - A ±50 mm sinusoidal weave on the straights (wavelength 1300 mm), tapered to zero at their ends.
+  - CW is the mirror image.
+  - `pose(s)` gives the position and grid bearing at arc length s.
+- **`SimStm32`:** turns true motion into `$IMU` lines through the same parser as the real link.
+  - yaw = `IMU_YAW_SIGN × bearing + 37° chip zero + drift + noise`, wrapped to ±180 and printed to 2 decimals.
+  - enc = whole ticks of the true distance. An optional scale error simulates a wrong calibration.
+  - Optionally drops lines. The seq still advances, so the gap shows.
+- **`random_lane_pillars`:** 1–2 pillars per lane on rulebook seats (Fig. 8c), none within 150 mm of the start pose.
+- **`run_mock(direction, start_slot, …)`:**
+  - Chooses the weave phase so the start pose has the requested placement yaw.
+  - Initialises from a simulated start scan, then drives the laps, feeding 100 Hz STM32 lines and, while the tracker asks, 10 Hz LIDAR frames.
+  - Reports turns, position and heading errors against the truth, seats right, wrong or unknown per lane, and initialisation errors.
+  - **The LIDAR model (§9.11).** Each re-check frame is one revolution of a spinning sensor on the moving robot (`lidar_sweep=True`, the default). Each ray is cast from the pose at the moment it was measured.
+    - The raw angle increases with time, so the robot angle runs in the direction of `LIDAR_ANGLE_SIGN`.
+    - `lidar_sweep=False` gives the old instantaneous snapshot.
+  - **Timing.**
+    - STM32 lines arrive `imu_latency_s` (2 ms) after sampling.
+    - LIDAR returns are stamped as `lidar_source` would stamp them: measurement time + 2 ms + `LIDAR_TIME_OFFSET_S` + `lidar_stamp_error_s`. So a correctly measured offset lines the two sensors up exactly.
+    - `deskew=False` hands frames over without times.
+
+### 9.10 Found and fixed while testing checkpoint B
+
+1. **`run_track.py --real` opened the STM32 link only after initialisation.** The tracker's reference was whatever sample arrived then, so any motion between the scan and that moment was lost.
+   - Found by the pseudo-terminal harness, with the robot driving off as the link opened: at the entry re-checks the tracked pose was **94–200 mm and about 4° off**, and **3 seat verdicts were wrong**.
+   - Fixed: the link is opened first, and the reference is the sample current at the scan (§9.8, steps 1–3). The regression test is `test_run_track.py`, the "robot drives off during initialisation" case.
+2. **The first sample was read from the link's statistics, then the queue was emptied.** That sample could be fed twice, which is logged as a spurious STM32 restart, and samples arriving in between were lost. Fixed: `_take_latest` takes the newest sample off the queue itself.
+3. **`--log` appended to the file.** A second run into the same file mixed two runs, and a replay paired one run's scan with the other run's IMU lines. Found by `test_run_track.py`. Fixed: overwrite, like `--dump`.
+4. **An I/O error was printed when the reader was stopped** (the port closing under it). It is now ignored after `stop()` and reported otherwise.
+
+### 9.11 P9: the LIDAR sweeps while the robot moves, fixed by de-skewing (decision #38)
+
+#### 9.11.1 The problem
+
+The entry re-check pairs each LIDAR frame with the tracked pose at the moment the frame is read. A real frame is not a snapshot: `lidar_source` serves the latest return in each 1° bucket, so one frame holds returns measured over the last revolution, about 100 ms at the C1's 10 Hz.
+
+- In those 100 ms the robot drives 60 mm at 600 mm/s, and coming out of a corner it rotates up to about 9°.
+- The seat check's margins are 4° in bearing and 70 mm + 3% in range. A near seat's bearing moves several degrees when the robot moves 60 mm.
+
+The first B tests cast every simulated frame instantaneously, which hid this.
+
+**Measured** with each frame as one real revolution (lap-1 re-checks, 16 runs, 288 verdicts): **13 wrong** at 600 mm/s and **32 wrong** at 1000 mm/s.
+
+What doesn't help (scratch experiments):
+
+- **A tighter alignment gate:** ±10° gives 21–26 wrong and ±5° gives 28, because most of the smear comes from the forward motion.
+- **A yaw-rate gate:** it rejects every frame in the entry window.
+
+Initialisation is not affected, because the robot is stationary.
+
+Decision #38: **de-skew** each return, and measure the LIDAR vs STM32 delay on the robot.
+
+#### 9.11.2 One clock for both sensors (`timing.py`)
+
+Everything is put on the Pi's `time.monotonic()` clock. Two sources of timing error are removed; one constant remains and is measured (§9.11.4).
+
+**STM32 lines, `LinkClock`.** A line carries `t_ms` (the STM32's clock when sampled) and `rx_time` (the Pi's clock on arrival). Arrival jitters with USB polling and the reader thread; `t_ms` doesn't. So:
+
+```
+pi_time(t_ms) = t_ms / 1000 + offset
+offset        = min over the last 5 s of (rx_time − t_ms / 1000)
+```
+
+- The least-delayed line sets the offset, so the jitter drops out and only the smallest, constant delivery delay remains.
+- The window slides, which follows the slow drift between the two crystals.
+- If `t_ms` goes backwards (the STM32 restarted), the window starts over.
+
+**LIDAR returns, `SweepClock`.** A return's arrival time is only an upper bound on when it was measured, because the driver may hand points over in bursts. The sensor spins at a steady rate, though, so the measurement time follows from the angle.
+
+- **Unwrapping:** the raw angle increases through each revolution (the RPLIDAR convention). Each return's angle is unwrapped to the nearest turn of the previous return's, giving θ. That makes both the 360 → 0 wrap and slightly out-of-order returns correct.
+- **The model:** θ grows linearly with time, `t(θ) = t0 + θ × sec_per_deg`.
+- **`sec_per_deg`** is a least-squares fit over the last 1 s, taken three times: first through all returns, then twice through the 5% that sit lowest under the previous fit. Those are the least-delayed returns. A fit through all returns would be tilted by the bursts' sawtooth at the window's ends.
+- **`t0`** comes from the least-delayed return: `min(arrival − θ × sec_per_deg)`.
+- **Fallback:** until about one revolution of data exists, or if the rate is outside 2–30 Hz, there is no fit and arrival times are used.
+
+**`lidar_source`** feeds every return to a `SweepClock` as it takes it off the queue. Each bucket keeps its θ and arrival time.
+
+- `get_latest_scan_timed()` returns the table with each return's time `t(θ)`.
+- `get_points_since(t)` gives every return of the last ~4 s, for recordings.
+- `get_latest_scan()` is unchanged.
+
+#### 9.11.3 The de-skew (`deskew.py`, `lane_tracker.py`)
+
+**Pose history.** Alongside the lane pose, the tracker integrates every STM32 sample into an odometry pose (ox, oy, heading) in one fixed frame. It uses the same midpoint integration; the frame is the start lane's orientation and is never switched at turns.
+
+- Each pose is stored with its `LinkClock` time, for `DESKEW_HISTORY_S` (0.5 s).
+- Only relative motion over about 0.1 s is ever used, so the frame's origin doesn't matter.
+
+**De-skewing a frame.** The run loop hands the tracker the frame's returns with their times. The reference is the pose at the **frame's end** (its newest return), taken from the history. The seat check also runs with the lane pose of that moment. (Checkpoint B first used the tracker's newest pose; see P11, §10.7.) For each return:
+
+```
+t_i      = its sweep time − LIDAR_TIME_OFFSET_S
+pose_i   = the odometry pose at t_i (linear interpolation in the history)
+p_robot  = the return in the robot frame at t_i       (sensor position + lever arm)
+p_odo    = p_robot placed with pose_i                  X = ox + f sin h + r cos h,  Y = oy + f cos h − r sin h
+p_ref    = p_odo seen from the reference pose          f' = dX sin h_ref + dY cos h_ref,  r' = dX cos h_ref − dY sin h_ref
+return'  = p_ref − lever arm                           → new angle and range
+```
+
+Edge cases:
+
+- **Returns measured before the history starts** (0.5 s) are **dropped**. Such a bucket hasn't been refreshed, because there is no return there any more, and its range is stale. This also removes the rolling table's old leftovers.
+- **Returns measured after the newest STM32 sample** (less than one 10 ms period) are placed with the pose extrapolated at the last 30 ms's velocity, by at most 50 ms.
+
+The seat check then runs on the de-skewed frame, exactly as before, and the coverage check of P10 (§10.7) follows it. Each lane's record counts the returns dropped as stale, the largest distance a return was moved, frames skipped as too late, and EMPTY verdicts turned UNKNOWN. The `recheck_frozen` event reports them.
+
+**Verification.**
+
+- Against independent geometry (`test_deskew.py`): up to 369 mm of smear becomes 0.008 mm.
+- End to end (`test_lane_tracker.py`): **0 wrong** at 600 and 1000 mm/s, where it was 13 and 32 without the de-skew (§8.2).
+- On real clocks through the pseudo-terminal harness (`test_run_track.py`): 0 wrong.
+
+#### 9.11.4 Measuring `LIDAR_TIME_OFFSET_S` (`measure_lidar_delay.py`)
+
+The clocks leave one constant: how much later a LIDAR return reaches the Pi than an STM32 line does, each counted from when it was measured. It covers the driver's smallest delay, the BNO08x's own fusion delay and the STM32's send delay, and none of them can be known without the robot. In simulation, the de-skew tolerates about ±10 ms of error in it; at 30 ms off, wrong verdicts start (§8.2).
+
+**Procedure** (about 20 s; `python3 measure_lidar_delay.py --real --record delay.json`):
+
+1. Robot on the mat, with walls within about 3 m. Keep it **still** for 3 s; this is the reference scan.
+2. When told, **turn it on the spot**, back and forth about ±30°, roughly one swing per second, for 10 s. By hand is fine. Only the IMU heading is used, not the wheels.
+3. When told, keep it still for 2 s.
+4. The tool prints `LIDAR_TIME_OFFSET_S = +0.0xx`. Put that value in `config.py`.
+
+**Method.**
+
+- While the robot turns, each return is rotated back into the still robot frame using the IMU heading at the return's time (lever arm included). If the time is right, the returns land on the reference scan's walls; if it is off by d, the rotation during d smears them.
+- For every d from −100 to +100 ms in 1 ms steps:
+  - the cost is the mean |range − reference range| at the return's new angle
+  - each difference is capped at 50 mm, so walls seen in only one of the two scans don't dominate
+  - the reference range is interpolated between 1° bins at their centres
+- The offset is the d with the lowest cost, refined between steps with a parabola.
+- Only rotation is modelled, so a few centimetres of wander adds the same error at every d and doesn't move the minimum.
+- **Reliability:** the report prints how far and how fast the robot turned, the LIDAR spin rate, how bursty the delivery was, and the cost curve's depth. It says **NOT RELIABLE** if:
+  - the robot turned too little (90th-percentile rate below 30°/s)
+  - the minimum sits at the edge of the search
+  - the minimum is shallow (less than 1 mm better than 10 ms away)
+- `--replay FILE` re-analyses a saved recording. `--sim` makes one with a known offset.
+
+**Verification** (`test_lidar_delay.py`):
+
+- **Simulated recordings:** clocks on unrelated zeros, USB jitter, bursty or one-by-one LIDAR delivery, a lever arm. The offset is recovered within **0.3 ms**, or within 1.6 ms when the robot's centre wanders 20 mm unseen. A recording where the robot hardly turned is flagged.
+- **`--real`'s own recording path**, run in real time against a stand-in STM32 (pseudo-terminal) and a stand-in rplidarc1 driven by the same simulated robot: measured +3.7 to +4.0 ms against an actual +4.1 ms.
+
+`LIDAR_TIME_OFFSET_S` is **0 until you measure it**. At 0, the de-skew still removes the sweep smear; only the constant delay between the two sensors is left uncorrected.
+
+### 9.12 Known limits
+
+- **Nothing corrects the pose after initialisation**, by design (item 4 of the brief). Consequences:
+  - Initialisation's errors stay. With yaw taken as 0 (#4), 3.5° of placement yaw leaves y up to about 48 mm off for the whole run.
+  - Heading drift accumulates (§8.2). The BNO08x's real drift is unknown until it is measured on the robot.
+- **Wheel slip isn't seen.** The encoder measures wheel rotation, and the guard only catches impossible jumps (> 3000 mm/s).
+- **The pyserial open is the one line never executed here.** pyserial couldn't be installed in the sandbox (PyPI is blocked), so `serial.Serial(port, 115200, timeout=0.05)` is untested. Everything after the open is tested through a real pseudo-terminal.
+- **`lidar_source.py` is still untested against the real rplidarc1.** Its new timestamps are tested with a stand-in built on the same assumed API, and the stand-in delivers in bursts. The sweep clock relies on the raw angle increasing through each revolution. `measure_lidar_delay.py` reports the LIDAR's backward steps and delivery spread, so a surprise shows up there.
+- **`LIDAR_TIME_OFFSET_S` is 0 until measured on the robot** (§9.11.4, §11).
+- **`MAX_SPEED_MM_S = 3000`** was approved (#37). It needs to sit above the robot's real top speed.
+- **Simulated values are not measurements of your robot.** The simulator's own figures (10 Hz LIDAR, 100 Hz STM32, 0.15° yaw noise, 0.01°/s drift) are modelling choices, not measurements.
+
+### 9.13 For approval
+
+Checkpoint B items 1–5 were approved (#37). The P9 fix (#38) added these, **all approved (#39)**:
+
+1. **`timing.py`:**
+   - `LinkClock`: STM32 time mapped to the Pi clock by the least-delayed line in 5 s
+   - `SweepClock`: each LIDAR return's time from its unwrapped angle, with the slope through the least-delayed 5% and the intercept from the least-delayed return, over 1 s
+2. **`lidar_source.py`:** per-bucket angle and arrival time, `get_latest_scan_timed()`, `get_points_since()` and `timing_status()`. `get_latest_scan()` is unchanged.
+3. **`deskew.py` and the tracker's odometry pose history:**
+   - 0.5 s of history (`DESKEW_HISTORY_S`)
+   - returns older than the history are dropped
+   - returns newer than the last pose are extrapolated by at most 50 ms
+   - the counters per lane
+4. **`LIDAR_TIME_OFFSET_S`** (default 0) and **`measure_lidar_delay.py`:** the procedure, the method, and the NOT RELIABLE checks.
+5. **`run_track.py`:** `--real` uses the timed frames; the new `--sim` flags.
+6. **`simulation.py`:** the real-sweep LIDAR model is now `run_mock`'s default, and the timing parameters.
+7. **`test_timing.py`, `test_deskew.py`, `test_lidar_delay.py`**, plus the de-skew requirement in `test_lane_tracker.py`: 0 wrong at 600 and 1000 mm/s with correct timing.
+
+## 10. Checkpoint C: the dashboard
+
+Implemented to the agreed design (decisions #16, #21, #22) and the details settled for it (#41–#44), and **approved (#45)**. Testing it found two problems in the checkpoint B code, P10 and P11 (§10.7). Both are fixed, and the fixes are **approved (#46)**.
+
+![The dashboard in mock mode after a lap](dashboard_mock_lap.png)
+
+Run with `python3 dashboard_server.py` and open `http://<pi-or-localhost>:5056/`. `config.MODE` picks real hardware or the simulation.
+
+### 10.1 The fixed full-loop frame (`display.py`)
+
+Everything on the canvas is drawn in one frame that never rescales: the 3000 × 3000 mm loop square, X to the right, Y up, and bearings clockwise from "up the screen".
+
+- **Lane 1 (tracker slot 0)** travels **up** the screen, on the strip it holds when the loop closes.
+  - CCW, outer wall on the robot's right: the **right-hand** strip, `X = 3000 − x`, `Y = y`
+  - CW, outer wall on the left: the **left-hand** strip, `X = x`, `Y = y`
+- **Every later lane** is placed by running the tracker's own corner transform backwards. From slot k to slot k−1: `old_x = new_y`, `old_y = 3000 − new_x`, repeated down to slot 0.
+  - So the drawing agrees with the tracker by construction: a pose re-expressed at a turn lands on the same screen point with the same heading (`test_display.py`: worst 2 × 10⁻¹³ mm).
+  - Lanes 2–4 fill the top, far side and bottom strips in driving order.
+- **Headings:** the tracker's unwrapped heading is already relative to the start lane's grid north, i.e. to "up", so it is the screen bearing directly.
+- **Mock truth:** the simulator's global mat coordinates reach the screen through slot 0's lane frame, extended over the whole mat. This lands exactly where the tracker's lane coordinates are drawn, in every lane and for every start section (`test_display.py`).
+
+### 10.2 What is drawn
+
+- **Lanes, added one per turn.** A lane appears when the tracker creates its record: lane 1 at initialisation, each next lane at the turn into it. Undriven lanes stay blank. Each lane shows:
+  - its strip, with the current lane shaded lighter
+  - its outer wall (the whole 3000 mm)
+  - its island wall (y 1000–2000)
+  - its number, placed between the inner seats and the island
+- **Seats, 3 states and their source.**
+  - present = filled amber; absent = green outline; unknown = grey dashed outline
+  - **square = decided by initialisation, diamond = decided by the entry re-check**
+  - hovering over a seat shows its name, verdict, source, the y it was decided at, and the detector's reason
+- **Robot:** a white arrow at the tracked pose. It is a marker, not to scale.
+- **IMU-traced path:** the tracker's path record, one point every 20 mm.
+- **Frozen init scan (purple):** the start scan, drawn from the tracker's start pose (x, y, ψ0).
+- **Live scan (yellow):** the latest LIDAR frame, de-skewed to the current pose (`LaneTracker.deskew_view`) and drawn from it.
+  - The walls then sit still on the screen while the robot moves.
+  - Before initialisation there is no pose, so the live scan is drawn around the robot at the centre, facing up, and labelled as such.
+- **Mock only, truth (pink, faint):** the true pillars as dashed squares and the true robot as an outline arrow. A seat whose verdict disagrees with the truth gets a red ring.
+- **Layer switches:** live scan, init scan, path and truth can each be switched off.
+
+### 10.3 The panel
+
+- **Controls:**
+  - **Initialise** (Re-initialise once running) and **Save run**
+  - in mock mode: direction, start section, seed, speed and time scale (1×, 2×, 4×), all applied at the next Initialise
+- **Tracker:** lane (with lap and lane of the loop), x, y, ψ, the unwrapped heading, ψ0, distance, and whether the entry re-check is running.
+- **Lanes:** per lane, the six verdicts and where they came from. For entry re-checks it also shows:
+  - frames used, and frames skipped by the ±20° gate
+  - the largest de-skew shift
+  - returns dropped as stale
+  - frames skipped as too late or from before the lane (#44)
+- **Initialisation:** the result and reason, then the direction with both sides:
+  - wall distance, tilt, opening and where it lies, and the wall/through/blocked counts
+  - x with d90, d270 and their sum
+  - y with the front distance and fan counts
+  - ψ0, and the seat table with the detector's reasons
+- **STM32:**
+  - port and link state (OK, STALE, or the error)
+  - rate, age of the last line, lines ok/bad, lost lines, restarts, and the last bad line
+  - raw yaw and encoder, heading and distance
+- **LIDAR (#44):** driver state or error, spin rate, age of the last return, and the sweep clock's backward steps (should stay about 0). In real mode also the returns received.
+- **Events:** the tracker's last 30 events, newest first (turns, re-checks frozen, glitches, restarts).
+- **Tuning (#43):** four collapsible groups, 42 parameters (§10.5).
+
+### 10.4 The runtime (`dashboard_server.py`)
+
+**Hardware.**
+
+- Real mode starts `stm32_link.Stm32Link` and `lidar_source.RPLidarC1Source` with the server.
+- Mock mode starts `live_sim.LiveSim` (§10.6), which has the same two interfaces.
+
+**Initialise (#41).** Nothing is initialised until the button is pressed, with the robot standing still.
+
+- **Real:**
+  1. Take the newest STM32 sample and the current scan.
+  2. Run `lane_init.initialise`.
+  3. Start a `LaneTracker` from them. This is the same pairing as `run_track.py --real` (§9.8).
+- **Mock:** first rebuild the simulated world from the panel's settings. Then the same steps, and the simulated robot drives off 1 s later.
+- **Pressing it again** throws away every lane, seat and path and starts over from lane 1.
+- **On failure** the reason is shown and nothing is tracked.
+
+**The loop.** A background thread runs about 50 times a second. Each pass:
+
+1. About 20 times a second, **read a LIDAR frame with its measurement times**. This comes **before** taking the STM32 samples, so the pose history already reaches the frame's newest returns.
+2. Feed every new STM32 sample to the tracker.
+3. Hand the frame to the tracker while its entry re-check is open. The tracker judges it from the pose at the frame's end (§10.7, P11).
+4. At `STREAM_HZ`, de-skew the frame to the current pose for display.
+
+An exception in the loop is shown on the page and the loop keeps running.
+
+**To the page.**
+
+- `/stream` (Server-Sent Events, at `STREAM_HZ`) sends the whole state as JSON: live scan, robot, lanes with seats and outlines, path, tracker, initialisation summary, STM32 and LIDAR status, and in mock mode the truth.
+- The truth robot is the true pose at the instant of the tracker's newest sample, so the two compare like for like.
+- The init scan and the truth pillars don't change during a run. They come from `/api/static` once per initialisation, keyed by `init_id`.
+- **Other routes:** `/api/state`, `/api/initialise`, `/api/mock`, `/api/tuning`, `/api/param`, `/api/tuning/reset` and `/api/save-run`.
+
+**Save run (#44)** writes two files in the formats `run_track.py --replay-scan/--replay-imu` reads, and the page shows the replay command:
+
+- `runs/<date>_<time>/scan.json`: the start scan and the seq of the STM32 sample current at it
+- `imu.log`: every STM32 sample since initialisation
+
+### 10.5 Tuning panel (#43)
+
+Every value can be edited on the page. Each one shows:
+
+- its meaning, and what goes wrong if it is off
+- when it takes effect: **live** (read on every use) or **next Initialise** (captured when the tracker and seat check are built)
+- the value in `config.py`, when the edited value differs from it
+
+Edits are kept in memory only; **Reset to config.py** restores the file's values, and a value is kept by copying it into `config.py`. Bad values (not a number, not finite, not one of the allowed options) are refused with the reason.
+
+| Group | Parameters |
+|---|---|
+| LIDAR mount + calibration (7) | `LIDAR_ANGLE_SIGN`, `LIDAR_ANGLE_ZERO_OFFSET_DEG`, `LIDAR_OFFSET_FORWARD_MM`, `LIDAR_OFFSET_LATERAL_MM`, `REAR_BLIND_ARC_CENTER_DEG`, `REAR_BLIND_ARC_WIDTH_DEG`, `LIDAR_TIME_OFFSET_S` |
+| Initialisation thresholds (14) | `LANE_WIDTH_MM`, `LANE_WIDTH_TOLERANCE_MM`, the five `SIDE_WALL_*`, the five `GAP_*`, `FRONT_FAN_HALF_DEG`, `FRONT_BAND_MM` |
+| Tracker + IMU (10) | `IMU_YAW_SIGN`, `ENCODER_TICKS_PER_CM`, `MAX_SPEED_MM_S`, `TURN_MIN_DEG`, `TURN_GATE_Y_MM`, `TURN_FAILSAFE_DEG`, `RECHECK_Y_MAX_MM`, `RECHECK_ALIGN_DEG`, `DESKEW_HISTORY_S`, `IMU_STALE_S` |
+| Seat detector (11) | the `DetectParams` margins: angular margin, range tolerance (fixed and proportional), min points, max width factor, max range step, min expected hits, min observable face, seat position slack, min and max range. The lever arm and blind wedge come from the first group. An edit reaches the running tracker immediately |
+
+In mock mode, two values are also used to build the simulated hardware, at Initialise:
+
+- **`IMU_YAW_SIGN` and `ENCODER_TICKS_PER_CM`:** changing them afterwards shows what a wrong calibration does.
+- **`LIDAR_TIME_OFFSET_S`:** the simulated LIDAR follows it, so changing it has no effect in mock mode.
+
+### 10.6 Mock mode (`live_sim.py`, #42)
+
+`LiveSim` is `run_mock`'s world (`simulation.make_world`), run in real time.
+
+- **The clock:** a background thread advances a simulated clock in 10 ms steps. The clock can run 2× or 4× faster than real time.
+- **The STM32:** each step emits the STM32 line a real robot would send (`SimStm32` through the real parser), arriving 2 ms after it is sampled.
+- **The robot** stands at its start until Initialise, then drives 3 laps of `LoopPath` at the chosen speed and stops.
+- **The LIDAR:** `get_latest_scan_timed()` is one real revolution ending now (`simulation.cast_revolution`). Each ray is cast from the pose at the moment it was measured and stamped as `lidar_source` would stamp it, so the de-skew and the seat check run exactly as on the robot.
+- **Truth:** `truth()` gives the true pillars, the true pose (optionally at a given moment) and the true seats per lane, for the overlay.
+
+`simulation.py` gained two shared helpers so that `run_mock` and `LiveSim` build identical worlds; `run_mock`'s results are unchanged:
+
+- **`make_world`:** the path with its placement-yaw phase, the start, and the pillars
+- **`cast_revolution`:** one swept revolution from a pose-at-time function
+
+### 10.7 Found while testing C: P10 and P11 (in checkpoint B's code, fixed)
+
+Both showed up only as rare wrong seat verdicts when the dashboard loop fell behind, in mock mode at 4× time with the machine loaded. `test_dashboard.py`'s `test_lagging_loop` replays the loop deterministically, with random gaps between LIDAR reads (up to 0.5 s) and a random lag (up to 0.3 s) before the STM32 samples are taken. It shows both problems and their fixes.
+
+**P11: a frame was judged from the wrong pose.**
+
+- The re-check de-skewed each frame to the tracker's **newest** pose and ran the seat check there. When a frame is processed late, that pose can be hundreds of millimetres and degrees past where the frame was taken.
+  - De-skewing moves each return correctly in space, but the check's line-of-sight reasoning ("the ray passed beyond the seat") holds only from the viewpoint the returns were taken from.
+  - Option A had said "the pose at the frame's end"; the implementation used the newest pose instead.
+- **Fixed:**
+  - Each pose in the history now also carries the lane pose (lane, x, y, ψ).
+  - The re-check judges a frame at its **end**, the time of its newest return (or now, if that is newer than the newest STM32 sample). It de-skews to the pose of that moment and runs the seat check with that moment's lane pose; the ±20° gate and the y < 1000 window also apply at that moment.
+- **Late frames:** a frame taken inside its lane's window still counts if it is processed after the re-check froze. A frame is skipped (counted, so the seats stay UNKNOWN) if:
+  - it ended before its lane began, or
+  - the 0.5 s history no longer reaches `FRAME_SPAN_S` (0.15 s, one revolution plus margin) before its end. Judging on a partial revolution would lose a sector of returns.
+- **Verified (`test_lane_tracker.py`):** frames delivered 250 ms late give exactly the same verdicts as on-time frames (0 wrong). At 450 ms late every frame is skipped, all UNKNOWN, never wrong.
+
+**P10: the revolution's seam while turning.**
+
+- A LIDAR frame, real or simulated, holds each direction's latest return. Just ahead of the beam those are a whole revolution old, and just behind it they are new.
+- While the robot turns, the world direction of everything moves by the rotation during that revolution (about 4° at 40°/s). So a sector that wide at the seam was seen by **neither** end of the revolution.
+- If a pillar stands in that sector, the de-skewed frame has a hole exactly where it is, with the wall behind visible on both sides. The seat detector (checkpoint A, unchanged) counts returns anywhere in its ±(4° + pillar width) search window, so it read the seat as EMPTY. One such case: the returns stop at −2.1° and resume at +4.1° around the seat's bearing, and the pillar spans −1.5° to +1.1°.
+- **Fixed** (`LaneTracker._coverage_check`, in the entry re-check only):
+  - A frame's EMPTY verdict becomes UNKNOWN when its search window contains a hole wider than both the pillar's predicted angular width and 2.5× the frame's typical return spacing.
+  - Another frame usually decides the seat.
+  - OCCUPIED verdicts are positive evidence and are left alone.
+  - Initialisation is stationary, so it has no such hole.
+- **Verified:**
+  - `test_lagging_loop`, 40 runs: **0 wrong in about 420** verdicts; with the check switched off, 8 wrong in 509.
+  - `test_coverage_hole`: a 5° hole over an occupied seat fools the detector alone into EMPTY and the check makes it UNKNOWN; a fully covered empty seat stays EMPTY.
+  - Cost: slightly more UNKNOWNs. In the de-skew table (§8.2), 1000 mm/s now leaves 41 of 288 unknown instead of 19.
+
+**Also changed, in `run_track.py --real` too:** the loop reads the LIDAR frame **before** taking the STM32 samples, so the pose history reaches the frame's end.
+
+### 10.8 Known limits
+
+- **The page is a local debugging tool:** no login, and it binds `0.0.0.0` (`DASHBOARD_HOST`). It is meant for the robot's own network.
+- **The robot marker is not to scale:** the robot's dimensions aren't in the codebase.
+- **Pose is only known after Initialise.** Before it, the live scan is robot-centred.
+- **Real mode is tested only with stand-in hardware:** a pseudo-terminal STM32 and a stand-in LIDAR, as in B. The real rplidarc1 and the pyserial open remain untested here.
+- **Mock mode at 4× on a loaded machine** gets fewer re-check frames per lane (as few as 1–2), so more seats stay UNKNOWN; never wrong in the tests.
+
+### 10.9 For approval (all approved: #45, #46)
+
+1. **`display.py`:** the fixed frame, lane 1 up the screen on the right strip (CCW) or left strip (CW), later lanes by the inverse corner transform.
+2. **The drawing:** lanes added per turn; the seat symbols (filled, outline, dashed; square for init, diamond for entry); the robot arrow; path; init and live scans; mock truth; layer switches; hover details.
+3. **The panel:** Controls, Tracker, Lanes (with de-skew stats), Initialisation, STM32, LIDAR health, Events.
+4. **The runtime:** Initialise and Re-initialise (#41); the loop order (LIDAR frame, then STM32 samples); SSE plus `/api/static`; Save run.
+5. **The tuning panel:** 42 parameters in four groups, each with its meaning and when it takes effect; edits in memory only, with Reset.
+6. **Mock mode:** `live_sim.py`, and `make_world` / `cast_revolution` in `simulation.py`.
+7. **P11:** frames judged at their end, late frames still counted inside their window, and frames not fully covered by the history skipped (`FRAME_SPAN_S` 0.15 s).
+8. **P10:** the coverage check that turns an EMPTY with a hole in its window into UNKNOWN.
+9. **Tests:** `test_display.py`, `test_dashboard.py`, and the additions to `test_lane_tracker.py` (late frames, coverage hole).
 
 ## 11. Things to measure or set on the real robot
 
 | What | Where | How |
 |---|---|---|
-| **LIDAR angle sign: OPEN (§5.7.3)** | `config.LIDAR_ANGLE_SIGN` | The LIDAR is mounted upside down, which reverses its rotation sense, so measure the sign rather than infer it. Away from walls, put **one** object about 30 cm from the LIDAR on the robot's **right** (looking the way the robot faces), with nothing else within about 1 m, and run `run_init.py --real --dump sign.json`. The object must read about 90°. If it reads about 270°, set SIGN = −1. |
+| LIDAR angle sign: **measured −1** (23 Sept, §5.7.3) | `config.LIDAR_ANGLE_SIGN` | The LIDAR is mounted upside down. An object 30 cm to the robot's right read raw 272°, so SIGN = −1. **Re-measure if the LIDAR is ever remounted**: put one object on the robot's right and run `run_init.py --real --dump sign.json`; it must read about 90°. |
 | LIDAR zero offset | `LIDAR_ANGLE_ZERO_OFFSET_DEG` | An object dead ahead must read about 0°. In the 23 Sept scan the pillar ahead read 352–11° and the chassis wedge was centred on 181°, so 0 looks right. |
-| Lane width | `config.LANE_WIDTH_MM` | Tape the outer-to-island distance on the field you run on. Rulebook: 1000. Your practice field: about 930 (scan: 926–934). |
+| Lane width | `config.LANE_WIDTH_MM`, `LANE_WIDTH_TOLERANCE_MM` | Rulebook 1000 with a ± 100 mm margin (decision #32). This covers the practice field (926–934 mm). |
 | LIDAR lever arm | `config.LIDAR_OFFSET_FORWARD_MM`, `_LATERAL_MM` (+ left) | Measure from the pose reference point you want x and y to describe. |
 | Rear blind wedge | `config.REAR_BLIND_ARC_CENTER_DEG`, `_WIDTH_DEG` | Measured on 23 Sept: 105° wide, centred on 181°. The config (180 / 105) already matches. |
 | Placement | — | Initialisation takes yaw = 0. y degrades by about 20 mm at 2° of placement yaw and about 40 mm at 3° (§5.4); the direction test is unaffected. |
-| (Checkpoint B) IMU yaw sign, encoder scale | `IMU_YAW_SIGN`, `ENCODER_MM_PER_COUNT` | Turn the robot clockwise by hand: the heading must increase. Roll a known distance to get mm per count. |
+| (B) STM32 port | `config.IMU_PORT` (default `/dev/ttyACM0`) | Check with `ls /dev/ttyACM*`. A `/dev/serial/by-id/…` path is safer, because ACM numbering can change when other USB devices are plugged in. |
+| (B) IMU yaw sign: **−1** from the owner (#36) | `config.IMU_YAW_SIGN` | Run `python3 run_track.py --bench` and turn the robot **clockwise** by hand, seen from above. `heading` must **increase** by the angle turned (90° for a quarter turn). If it decreases, the sign is wrong. |
+| (B) Encoder scale: **14.853 ticks/cm** from the owner (#36) | `config.ENCODER_TICKS_PER_CM` | In the same `--bench` run, roll the robot straight over a measured distance (say 2000 mm on the mat). `distance` must match. A 2% error gives about 50 mm of tracking error (§8.2). |
+| (B) Top speed | `config.MAX_SPEED_MM_S` (3000) | Must be above the robot's real top speed, or real motion is discarded as a glitch. |
+| (B) Heading drift | — | Leave the robot still for a minute in `--bench`. `heading` should barely move. Drift is the one tracking error that accumulates (§8.2). |
+| (B) Standing still at the start | — | For `run_track.py --real`, keep the robot still until the initialisation report appears. The scan must not be smeared. Motion after the scan is counted. |
+| (C) Dashboard mode | `config.MODE` | `"real"` for the robot (STM32 and LIDAR start with the server), `"mock"` for the simulation. Then press **Initialise** with the robot standing still at its start. |
+| (B, P9) LIDAR vs STM32 delay | `config.LIDAR_TIME_OFFSET_S` (0 until measured) | Run `python3 measure_lidar_delay.py --real --record delay.json`. Keep the robot still, then turn it on the spot ±30° about once a second when told (§9.11.4), then put the printed value in config. Repeat if it says NOT RELIABLE. Send `delay.json` if the result looks odd; `--replay` re-analyses it. |
 
 ## 12. How to run
 
@@ -680,4 +1376,29 @@ python3 run_init.py --sim --lane E --direction CW --x 350 --y 1250 --pillars 1,4
 python3 run_init.py --sim --lane N --direction CCW --x 100 --y 1500 --parking 1500
 python3 run_init.py --real --dump scan.json   # on the Pi, real LIDAR; saves the scan
 python3 run_init.py --replay scan.json        # re-run on a saved scan (e.g. send it for analysis)
+
+# checkpoint B tests
+python3 test_stm32_link.py         # line parser, assembler, reader thread through a pseudo-terminal
+python3 test_lane_tracker.py       # integration, turn rule, guards, 32 simulated 3-lap runs, P9 INFO
+python3 test_run_track.py          # run_track --bench / --real / replay with stub hardware (~30 s)
+python3 test_timing.py             # LinkClock, SweepClock, lidar_source timestamps (stand-in rplidarc1)
+python3 test_deskew.py             # the de-skew against independent geometry
+python3 test_lidar_delay.py        # measure_lidar_delay: simulated recordings + the --real path (~30 s)
+
+# tracking, printed as it happens:
+python3 run_track.py --sim --direction CW --slot 1 --seed 7 --placement-yaw 2
+python3 run_track.py --bench --log imu.log              # on the Pi: STM32 only, the calibration checks (§11)
+python3 run_track.py --real --log imu.log --dump scan.json   # on the Pi: init + tracking; Ctrl-C for the seat table
+python3 run_track.py --replay-scan scan.json --replay-imu imu.log   # re-run a recorded run offline
+python3 run_track.py --sim --speed 1000 --no-deskew     # P9 without the fix (wrong verdicts appear)
+
+# the dashboard (checkpoint C):
+python3 test_display.py            # the fixed loop frame vs the tracker's corner transform
+python3 test_dashboard.py          # mock end to end, tuning, lagging loop, real mode with stand-in hardware (~1 min)
+python3 dashboard_server.py        # then open http://<pi-or-localhost>:5056/ ; config.MODE "real" or "mock"
+
+# the LIDAR vs STM32 delay (P9):
+python3 measure_lidar_delay.py --real --record delay.json   # on the Pi (§9.11.4)
+python3 measure_lidar_delay.py --replay delay.json
+python3 measure_lidar_delay.py --sim --true-offset-ms 13
 ```

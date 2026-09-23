@@ -20,7 +20,10 @@ LIDAR_SCAN_TIMEOUT_S = 0.2
 # clockwise from forward, SIGN = +1 and OFFSET = 0. Check once on the bench:
 # put an object dead ahead (must read ~0) and one on the robot's right (must
 # read ~90). If right reads ~270, flip SIGN; if dead ahead isn't ~0, set OFFSET.
-LIDAR_ANGLE_SIGN = 1                 # +1 or -1
+# MEASURED 23 Sept 2026 (sign.json, now test_data/real_2026-09-23_sign_check.json):
+# the LIDAR is mounted UPSIDE DOWN, and an object placed ~30 cm to the robot's
+# RIGHT read raw 272 deg -> the raw angles run counter-clockwise -> SIGN = -1.
+LIDAR_ANGLE_SIGN = -1                # +1 or -1
 LIDAR_ANGLE_ZERO_OFFSET_DEG = 0.0    # degrees added after the sign
 
 # LIDAR mounting offset from the pose reference point (e.g. rear-axle
@@ -42,14 +45,18 @@ REAR_BLIND_ARC_WIDTH_DEG = 105.0    # total angular width of the blocked wedge
 # --- Field -----------------------------------------------------------------
 # Distance between the outer wall and the island wall. Rulebook (section 8,
 # Obstacle Challenge): always 1000 mm (+/- 10 at the International Final).
-# SET THIS TO YOUR FIELD'S TAPE-MEASURED WIDTH if it differs: every
-# "d(90) + d(270) = lane width" check uses it, and the mock world is built
-# with it. (Your practice field measured ~926-934 mm in the 23 Sept scan.)
+# Agreed (23 Sept): use the RULEBOOK value, with a margin of error
+# (LANE_WIDTH_TOLERANCE_MM) wide enough for real fields. Every
+# "d(90) + d(270) = lane width" check uses it and the mock world is built with it.
 LANE_WIDTH_MM = 1000.0
-# d(90) + d(270) must equal LANE_WIDTH_MM within this tolerance, otherwise
-# a side reading isn't the wall (or the robot isn't in a lane) and
-# initialisation refuses rather than trusts it.
-LANE_WIDTH_TOLERANCE_MM = 40.0
+# d(90) + d(270) must equal LANE_WIDTH_MM within this margin, otherwise a side
+# reading isn't the wall (or the robot isn't in a lane) and initialisation
+# refuses rather than trusts it. 100 mm: the practice field measured 926-934 mm
+# (23 Sept scan), i.e. ~70 mm under the rulebook, and still passes with ~25 mm
+# to spare; a side reading that ISN'T the wall (a pillar -- they stand >= 400 mm
+# from either wall -- or something seen through an opening) is off by several
+# hundred mm and is still refused. (Was 40 mm before the real scans.)
+LANE_WIDTH_TOLERANCE_MM = 100.0
 
 # --- Initialisation (LIDAR, once, robot stationary at its start pose) -----
 # x, y and the seat check take the robot's yaw as exactly 0 (agreed): LIDAR
@@ -84,6 +91,49 @@ GAP_FIT_AGREE_DEG = 2.0     # the two side walls are parallel: fitted tilts must
 # y: front-wall fan -- lane_init.measure_y().
 FRONT_FAN_HALF_DEG = 30.0   # returns within +/- this of 0 deg are considered
 FRONT_BAND_MM = 40.0        # the front wall = returns within this of the farthest forward distance
+
+# --- STM32 link: BNO08x heading + drive-motor hall encoder (checkpoint B) ----
+# Format (decision #17): "$IMU,<seq>,<t_ms>,<enc>,<yaw>\n" at 100 Hz. See stm32_link.py.
+IMU_PORT = "/dev/ttyACM0"    # STM32 native USB (CDC). Confirm with `ls /dev/ttyACM*`;
+                             # /dev/serial/by-id/... is safer (ACM numbering can change).
+IMU_BAUDRATE = 115200        # ignored by USB CDC; pyserial wants a number
+IMU_STALE_S = 0.2            # no line for this long -> link status "stale"
+# Owner (23 Sept): "IMU clockwise reads negative" -> the chip's yaw DEcreases when
+# the robot turns clockwise; the tracker wants clockwise-positive, so -1.
+IMU_YAW_SIGN = -1
+# Owner (23 Sept): TICKS_PER_CM = 14.853 (the STM32's cumulative `enc` counts
+# these ticks). 1 tick = 10 / 14.853 = 0.6733 mm.
+ENCODER_TICKS_PER_CM = 14.853
+# Plausibility guard: an encoder step implying more than this speed is treated
+# as a glitch (or an STM32 restart) and not integrated; the event is logged.
+MAX_SPEED_MM_S = 3000.0
+
+# --- Lane tracker (checkpoint B) --------------------------------------------
+# Starting heading: the placement yaw measured by the direction test's wall fit
+# (decision #35, tracker only -- initialisation's x/y/seats keep yaw 0).
+# Turn rule (decision #25): a turn is made when the heading has rotated at least
+# TURN_MIN_DEG toward the round direction AND tracked y >= TURN_GATE_Y_MM, or at
+# least TURN_FAILSAFE_DEG alone. Turns against the round direction are ignored.
+TURN_MIN_DEG = 45.0
+TURN_GATE_Y_MM = 2000.0
+TURN_FAILSAFE_DEG = 80.0
+# Entry-corner seat re-check (decisions #15, #19, #20, #23, #26): lap 1 only,
+# lanes after the start lane, every LIDAR frame while tracked y < RECHECK_Y_MAX_MM
+# and |heading| <= RECHECK_ALIGN_DEG; first decided verdict per seat is kept.
+RECHECK_Y_MAX_MM = 1000.0
+RECHECK_ALIGN_DEG = 20.0
+# De-skew of the re-check's LIDAR frames (decision #38, deskew.py / timing.py).
+# A frame is one ~100 ms revolution; each return is moved to where the current
+# pose would see it, using the tracked pose at the time it was measured.
+# DESKEW_HISTORY_S: how long the tracked-pose history is kept. Returns older
+# than this (a bucket not refreshed since -- no return there any more) are dropped.
+DESKEW_HISTORY_S = 0.5
+# LIDAR_TIME_OFFSET_S: how much later a LIDAR return reaches the Pi than an
+# STM32 line does, each counted from when it was measured (seconds; + = the
+# LIDAR is later). The de-skew takes a return as measured at
+# (its sweep time - this). MEASURE IT on the robot: python3 measure_lidar_delay.py --real
+# (docs/CHANGES.md section 11). 0 until measured.
+LIDAR_TIME_OFFSET_S = 0.0
 
 # --- Dashboard / server ---------------------------------------------------
 DASHBOARD_HOST = "0.0.0.0"
