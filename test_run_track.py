@@ -61,6 +61,10 @@ def child(mode: str, outdir: str):
 
     sys.path.insert(0, HERE)
     import config
+    # Checkpoint E set the real lever arm (LIDAR 134.6 mm ahead of the rear axle, from CAD); this
+    # harness's stand-in LIDAR casts from the pose point, so it pins the lever arm to 0.
+    config.LIDAR_OFFSET_FORWARD_MM = 0.0
+    config.LIDAR_OFFSET_LATERAL_MM = 0.0
     import lane_frame as lf
     import simulation as sim
 

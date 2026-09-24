@@ -23,6 +23,20 @@ rate is ignored by CDC). Agreed format (decisions #13, #17, #18):
     LOG_KEEP are kept for display, and they are never parsed as samples.
     Anything else that isn't a valid $IMU line is still counted as bad.
 
+    Status line (checkpoint E, decision #77): the drive firmware also sends,
+    at about 20 Hz,
+
+        $STA,<seq_ack>,<status>
+
+    seq_ack  the seq byte of the last valid DRIVE frame it accepted (0-255)
+    status   bit flags as in stm_link.py: 0 ENABLED, 1 WATCHDOG (it cut the
+             motor: no valid DRIVE frame for 250 ms), 2 BUTTON (start button
+             pressed since boot), 4 IMU_OK
+    It is kept as status()["sta"] and never counted as bad.
+
+    Writing (checkpoint E): the drive side (drive_link.py) sends its binary
+    DRIVE frames through write() on the same port, which this link owns.
+
 This module only turns bytes into validated ImuSample objects and keeps link
 statistics. What the samples MEAN (distance, heading, lane position) is
 lane_tracker.py's job.
@@ -47,6 +61,7 @@ PREFIX = "$IMU"
 N_FIELDS = 5            # $IMU, seq, t_ms, enc, yaw
 LOG_PREFIXES = ("#", "!")   # firmware log / tuning-reply lines (#52)
 LOG_KEEP = 20               # recent log lines kept for status()
+STA_PREFIX = "$STA"
 
 
 def is_log_line(line: str) -> bool:
@@ -95,6 +110,7 @@ class LinkStats:
     lines_log: int = 0           # '#' / '!' firmware lines skipped (#52)
     recent_log: deque = field(default_factory=lambda: deque(maxlen=LOG_KEEP))
     last_sample: ImuSample | None = None
+    sta: tuple | None = None     # (seq_ack, status bits, rx_time) of the last $STA line
     rate_hz: float = 0.0         # measured over the last ~1 s of arrivals
     _arrivals: deque = field(default_factory=lambda: deque(maxlen=200))
 
@@ -153,6 +169,8 @@ class Stm32Link:
         self._error: str | None = None
         self.stats = LinkStats()
         self._log_fh = None
+        self._port = None                      # the open stream, once the reader thread has it
+        self._wlock = threading.Lock()
 
     # -- public ------------------------------------------------------------
     def start(self, log_path: str | None = None):
@@ -182,6 +200,22 @@ class Stm32Link:
             out, self._pending = self._pending, []
         return out
 
+    def write(self, data: bytes) -> bool:
+        """Send bytes to the STM32 on the same port (the DRIVE frames). False if
+        the port is not open (yet) or the write failed."""
+        port = self._port
+        if port is None:
+            return False
+        try:
+            with self._wlock:
+                port.write(data)
+                if hasattr(port, "flush"):
+                    port.flush()
+            return True
+        except Exception as e:
+            self._error = f"write failed: {type(e).__name__}: {e}"
+            return False
+
     def status(self) -> dict:
         s = self.stats
         last = s.last_sample
@@ -200,6 +234,8 @@ class Stm32Link:
             "rate_hz": round(s.rate_hz, 1),
             "last_age_s": age,
             "stale": age is None or age > config.IMU_STALE_S,
+            "sta": None if s.sta is None else {"seq_ack": s.sta[0], "status": s.sta[1],
+                                               "age_s": round(time.monotonic() - s.sta[2], 3)},
             "last": None if last is None else {"seq": last.seq, "t_ms": last.t_ms,
                                                 "enc": last.enc, "yaw_deg": last.yaw_deg},
         }
@@ -222,6 +258,7 @@ class Stm32Link:
             self._error = f"could not open {self.port}: {type(e).__name__}: {e}"
             print(f"[stm32] {self._error}")
             return
+        self._port = stream
         first = True
         try:
             while not self._stop.is_set():
@@ -234,6 +271,14 @@ class Stm32Link:
                     now = time.monotonic()
                     if self._log_fh:
                         self._log_fh.write(line.rstrip("\r") + "\n")
+                    if line.strip().startswith(STA_PREFIX):
+                        parts = line.strip().split(",")
+                        try:
+                            self.stats.sta = (int(parts[1]), int(parts[2]), now)
+                            first = False
+                            continue
+                        except (IndexError, ValueError):
+                            pass                     # malformed: counted as bad below
                     if is_log_line(line):
                         first = False
                         self.stats.lines_log += 1

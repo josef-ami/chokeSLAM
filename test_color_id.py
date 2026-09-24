@@ -13,6 +13,14 @@ import numpy as np
 import camera_sim
 import color_id
 import config
+# Checkpoint E set the real lever arm (LIDAR 134.6 mm ahead of the rear axle, from CAD).
+# This suite's own ray-casting / worlds were written for the sensor AT the pose point,
+# so it pins the lever arm to 0 (the lever arm itself is tested in test_init.test_lever_arm).
+config.LIDAR_OFFSET_FORWARD_MM = 0.0
+config.LIDAR_OFFSET_LATERAL_MM = 0.0
+# ... and the camera offsets, which were placeholders equal to the LIDAR's (0) when these tests were written
+config.CAMERA_OFFSET_FORWARD_MM = 0.0
+config.CAMERA_OFFSET_LATERAL_MM = 0.0
 import simulation as sim
 
 
@@ -252,10 +260,11 @@ def test_wait_until_in_view_and_lane_close():
         r = sim.run_mock("CCW", seed % 4, seed=seed, laps=1, camera_hz=15)
         if not r["ok"]:
             continue
-        for slot, rec in r["tracker"].lanes.items():
-            for i, s in rec.seats.items():
-                if s.color == "unknown" and s.color_attempts == 0 and closed is None:
-                    closed = (seed, slot, i, s.color_reason)
+        # (checkpoint E, decision #82: the start lane's unknown colours are asked for again when lap 1
+        # comes back to it, so the closing is read from the tracker's events, not the final state)
+        for e in r["tracker"].events:
+            if e.kind == "color" and "UNKNOWN -- never in the camera's view" in e.detail and closed is None:
+                closed = (seed, e.lane_index, e.detail, e.detail)
         if closed:
             break
     assert closed and "never in the camera's view" in closed[3], closed

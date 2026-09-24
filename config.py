@@ -31,8 +31,12 @@ LIDAR_ANGLE_ZERO_OFFSET_DEG = 0.0    # degrees added after the sign
 # sits ahead of the reference point, LATERAL_MM is positive to the robot's
 # LEFT. Used by initialisation (x, y) and by the seat check (one source of
 # truth since Sept 2026 -- lane_init passes these into DetectParams).
-LIDAR_OFFSET_FORWARD_MM = 0.0        # <-- FILL IN
-LIDAR_OFFSET_LATERAL_MM = 0.0        # <-- FILL IN
+# Checkpoint E (decision #80): the pose reference point is the REAR-AXLE
+# MIDPOINT, and both values are derived from the CAD model (ASMB.3mf / ASMB.step,
+# 23 Sept): the RPLIDAR C1's spin axis (circle fit on the upside-down turret)
+# sits 134.6 mm ahead of the rear-axle midpoint and 0.7 mm to its right.
+LIDAR_OFFSET_FORWARD_MM = 134.6      # from CAD
+LIDAR_OFFSET_LATERAL_MM = -0.7       # from CAD (0.7 mm to the RIGHT)
 
 # --- Rear chassis blind arc ----------------------------------------------
 # A wedge of the LIDAR's view centred on the robot's rear is blocked by the
@@ -88,6 +92,13 @@ GAP_CLOSED_MAX_MM = 150.0   # ...and the other side at most this much
 GAP_MIN_ANGLE_FROM_FWD_DEG = 1.0   # rays closer to dead-ahead than this are skipped (sin ~ 0)
 GAP_FIT_AGREE_DEG = 2.0     # the two side walls are parallel: fitted tilts must agree within this
 
+# Checkpoint E PROPOSAL (awaiting approval; default False = decision #4, yaw 0):
+# take the robot's yaw from the direction test's wall fit (already used for the
+# tracker's starting heading, #35) for x, y and the seat check too. Found in the
+# closed-loop simulation: with yaw 0, y is off by ~15 mm per degree of
+# placement yaw (84 mm at 5.5 deg), which later moves the camera's box off pillars.
+INIT_USE_WALL_YAW = False
+
 # y: front-wall fan -- lane_init.measure_y().
 FRONT_FAN_HALF_DEG = 30.0   # returns within +/- this of 0 deg are considered
 FRONT_BAND_MM = 40.0        # the front wall = returns within this of the farthest forward distance
@@ -142,10 +153,14 @@ LIDAR_TIME_OFFSET_S = -0.05
 CAMERA_ENABLED = True               # real mode: open the camera (Picamera2) in the dashboard
 # Lever arm (#53): lens position relative to the pose reference point, like
 # LIDAR_OFFSET_*. UNMEASURED -- placeholder = the LIDAR's own offsets.
-CAMERA_OFFSET_FORWARD_MM = LIDAR_OFFSET_FORWARD_MM   # <-- MEASURE
-CAMERA_OFFSET_LATERAL_MM = LIDAR_OFFSET_LATERAL_MM   # <-- MEASURE (+ = LEFT, as the LIDAR)
-# Lens height above the floor (#65). UNMEASURED -- placeholder.
-CAMERA_HEIGHT_MM = 150.0                             # <-- MEASURE
+# Checkpoint E (#80): from CAD. The camera module itself is not in the model; its
+# mount is ("Camera mount": four holes at the Pi-camera pattern, 21 x 12.5 mm,
+# around an 18 mm lens hole). Lens = the hole's centre on the mount's front face:
+# 139.9 mm ahead of the rear-axle midpoint, on the centreline, 127 mm above the floor.
+CAMERA_OFFSET_FORWARD_MM = 139.9                     # from CAD (mount)
+CAMERA_OFFSET_LATERAL_MM = 0.0                       # from CAD (mount)
+# Lens height above the floor (#65), from CAD (mount).
+CAMERA_HEIGHT_MM = 127.0                             # from CAD (mount)
 # Mount (#54): optical axis horizontal, facing forward; body upside-down ->
 # every frame is rotated 180 deg in exactly one place (colour_id.correct_frame).
 CAMERA_ROTATE_180 = True
@@ -177,6 +192,97 @@ COLOR_RED_HUE = ((0, 10), (170, 179))
 COLOR_GREEN_HUE = ((40, 85),)
 COLOR_MIN_SAT = 80
 COLOR_MIN_VAL = 50
+
+# --- Vehicle geometry (checkpoint E, decision #80: derived from ASMB.3mf / .step) ---
+# CAD frame: y up (floor at y = -14.2), front toward -z, left toward -x (the
+# "Left Front Tire" etc. names fix the handedness). Reference point: rear-axle
+# midpoint (tyre centres x = -50.1 / +50.8, rear z = 140.35, front z = 4.5).
+WHEELBASE_MM = 135.9                 # front axle z 4.5 -> rear axle z 140.35
+TRACK_MM = 101.0                     # tyre centre to tyre centre
+WHEEL_DIAMETER_MM = 54.0
+# Collision footprint = every part below 100 mm (wall and pillar height), in the
+# robot frame about the rear-axle midpoint: 228.7 x 114.1 mm.
+BODY_FRONT_MM = 197.3                # ahead of the rear axle
+BODY_REAR_MM = 31.5                  # behind it
+BODY_HALF_WIDTH_MM = 57.2            # to either side (-56.8 .. +57.3 about x = 0.3)
+# Full outline including the wing (169-180 mm high, passes over walls and
+# pillars): used for the "projection inside the section" rules only.
+OUTLINE_FRONT_MM = 197.3
+OUTLINE_REAR_MM = 86.2               # wing trailing edge
+OUTLINE_HALF_WIDTH_MM = 87.0         # wing span 174 mm
+OUTLINE_LENGTH_MM = OUTLINE_FRONT_MM + OUTLINE_REAR_MM   # 283.5 -> parking lot 1.5 x = 425 mm
+# STEERING LOCK -- PLACEHOLDER (decision #78). NOT in the CAD (a static model has
+# no lock). Converted from the report's measured outer-body turning radii
+# (270 mm left, 249.9 mm right) with THIS car's footprint (outer front corner
+# 197.3 ahead, 57.2 out): rear-axle radius = sqrt(R_ob^2 - 197.3^2) - 57.2
+# -> 127.4 mm left / 96.4 mm right -> lock = atan(135.9 / R) = 46.8 / 54.6 deg.
+# MEASURE ON THE ROBOT (full-lock circle diameter each way) and replace.
+STEER_LOCK_LEFT_DEG = 46.8           # PLACEHOLDER
+STEER_LOCK_RIGHT_DEG = 54.6          # PLACEHOLDER
+# Servo mapping for the drive firmware (v7's values: straight 76.5, left stop 20,
+# right stop 140 servo degrees; below straight steers LEFT). Road-wheel angle is
+# taken as linear in servo angle between straight and each stop -- a PLACEHOLDER
+# until the wheel angle is measured at both stops.
+SERVO_STRAIGHT_DEG = 76.5
+SERVO_LEFT_STOP_DEG = 20.0
+SERVO_RIGHT_STOP_DEG = 140.0
+
+# --- Path planner (checkpoint E, vg_planner.py) -----------------------------
+# The planner's minimum radius is the lock radius x this factor, so the follower
+# keeps steering authority to correct errors on an arc.
+PLAN_RADIUS_FACTOR = 1.25
+PLAN_INFLATION_MM = 95.0             # node inflation: half-width 57.2 + clearance 30 + ~8 mm
+PLAN_CLEARANCE_MM = 30.0             # swept-footprint check: body + this must be free
+PLAN_INFLATION_STEP_MM = 15.0        # an obstacle the swept check hits is inflated by this and re-planned
+PLAN_MAX_ITER = 8
+PLAN_MAX_TURN_DEG = 150.0            # no single fillet turns more than this
+# Parking lot (rulebook Fig. 4 / 8d, decision in CHANGES E): against the outer wall,
+# 200 mm deep, 1.5 x OUTLINE_LENGTH_MM long between the two 20 mm limitations, at
+# the end of the start section a CCW car reaches last:
+#   CCW: y 2000 - 20 - lot .. 2000,  CW: y 1000 .. 1000 + 20 + lot   (lane frame)
+PARKING_DEPTH_MM = 200.0
+# Rulebook Fig. 8e: once the lot is placed, every sign of the start section is
+# moved to the seat nearer the inner wall, so the start lane's OUTER seats
+# (x = 400) are always empty. True: an UNKNOWN outer seat of the start lane is
+# not treated as a possible pillar (decision #72 applies to every other seat).
+START_LANE_OUTER_SEATS_EMPTY = True
+PARKING_BARRIER_MM = 20.0
+
+# --- Mission (checkpoint E, mission.py) --------------------------------------
+SPEED_LAP1_MM_S = 500.0              # decision #79
+SPEED_LAPS23_MM_S = 800.0
+SPEED_MIN_MM_S = 120.0
+LAT_ACCEL_MM_S2 = 1500.0             # arc speed limit v <= sqrt(a * R)
+DECEL_MM_S2 = 1200.0                 # braking into a stop
+VIEW_X_MM = (500.0, 350.0, 650.0)    # viewing-pose candidates (new lane's x, first = preferred)
+VIEW_Y_MM = 500.0                    # viewing pose: new lane's y (the corner square's centre line)
+LOOK_SETTLE_S = 0.6                  # at a viewing pose: minimum stationary time before planning
+LOOK_TIMEOUT_S = 2.5                 # ... and the most it waits for verdicts / colours
+COLOR_LOOK_DIST_MM = 800.0           # stop when a PRESENT pillar of unknown colour is this far ahead (rear axle)
+COLOR_LOOK_RETRIES = 3               # colour re-requests before it is passed as "either" (logged)
+REPLAN_DEVIATION_MM = 60.0           # laps 2-3: re-plan when the tracked pose is this far off the path
+REVERSE_SPEED_MM_S = 200.0           # E-A4 (awaiting approval): backing up straight when no forward path exists
+REVERSE_STEPS_MM = (150.0, 300.0, 450.0)
+REVERSE_MAX_PER_STOP = 2
+REVERSE_CLEARANCE_MM = 5.0           # a short straight line from a standstill (pose well known)
+FINISH_MARGIN_MM = 30.0              # stop with the whole outline this far inside the start section
+# Follower (pure pursuit on the rear axle, decision #67)
+PP_LOOKAHEAD_S = 0.30                # lookahead = speed x this ...
+PP_LOOKAHEAD_MIN_MM = 110.0          # ... clamped to this range
+PP_LOOKAHEAD_MAX_MM = 260.0
+DRIVE_HZ = 50.0                      # DRIVE frames per second to the STM32
+# Steering law: "rwf" = rear-wheel feedback (curvature feed-forward + lateral and
+# heading error feedback), "pp" = pure pursuit. See follower.py.
+FOLLOWER_MODE = "rwf"
+RWF_LENGTH_MM = 150.0                # a lateral error dies out over about this distance
+RWF_DAMPING = 0.8
+RWF_PREVIEW_S = 0.08                 # servo lag + link latency
+# Entry re-check extension (Q7a, decision #81): past RECHECK_Y_MAX_MM the re-check
+# stays open (lap 1) while a still-UNKNOWN seat is at least this far ahead.
+RECHECK_AHEAD_MIN_MM = 250.0
+RECHECK_EXTEND = True
+# Start-lane re-check when lap 1 comes back to it (Q7b, decision #82).
+RECHECK_START_LANE_ON_RETURN = True
 
 # --- Dashboard / server ---------------------------------------------------
 DASHBOARD_HOST = "0.0.0.0"

@@ -174,7 +174,11 @@ def test_end_to_end():
                               wrong, len(frozen), r["seats"]))
                 assert r["turns"] == 12, (d, slot, seed, r["turns"])
                 assert wrong == 0, (d, slot, seed, r["seats"])
-                assert len(frozen) == 3, (d, slot, seed, [e.detail for e in frozen])     # lanes 2-4 of lap 1 only
+                # lanes 2-4 of lap 1, plus (checkpoint E, decision #82) ONE start-lane re-check when lap 1
+                # comes back to it, if initialisation left an unknown seat / colour there
+                ret = [e for e in trk.events if e.kind == "recheck_start_lane"]
+                assert len(ret) <= 1 and len(frozen) == 3 + len(ret), (d, slot, seed, [e.detail for e in frozen])
+                assert all(not e.detail.startswith("slot 0") for e in frozen[:3])
                 assert trk.lanes[0].source == "init" and all(trk.lanes[k].source == "entry" for k in (1, 2, 3))
     worst = max(c[5] for c in cases)
     med = sorted(c[6] for c in cases)[len(cases) // 2]

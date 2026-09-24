@@ -84,7 +84,9 @@ def test_2026_09_23_pillar_beside():
         pillar_side = d.left if sign == 1 else d.right
         other = d.right if sign == 1 else d.left
         assert pillar_side.opening_mm >= 700 and other.opening_mm <= 150, (pillar_side.opening_mm, other.opening_mm)
-        assert abs(res.y.y_mm - 1464) < 20, res.y.y_mm                  # fan reads the wall ahead, not the pillar
+        # the LIDAR was at y ~1464; the pose point is LIDAR_OFFSET_FORWARD_MM behind it (checkpoint E:
+        # the rear-axle midpoint, 134.6 mm behind the LIDAR per the CAD model)
+        assert abs(res.y.y_mm - (1464 - config.LIDAR_OFFSET_FORWARD_MM)) < 20, res.y.y_mm  # fan reads the wall ahead
         results[sign] = res
     # mirror consistency: flipping the sign flips the answer, and nothing else
     assert {results[1].direction.direction, results[-1].direction.direction} == {"CCW", "CW"}
