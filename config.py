@@ -87,17 +87,20 @@ SIDE_RAY_HALF_WINDOW_DEG = 2.0
 
 # Direction (gap) test -- direction_detect.py.
 GAP_MARGIN_MM = 80.0        # a return this much beyond the side-wall line = "passed through"
-GAP_OPEN_MIN_MM = 500.0     # the gap side needs at least this much opening (along the lane)
+# Checkpoint E, P1 (decision #84, approved): 500 -> 300. With the rulebook's start-section signs on the
+# inner row, a pillar on the far inner seat hides most of the opening: 500 refused 101 of 200 rulebook
+# starts, 300 refuses 34, with 0 wrong directions in 600 simulated layouts (docs/CHANGES.md 16.11).
+GAP_OPEN_MIN_MM = 300.0     # the gap side needs at least this much opening (along the lane)
 GAP_CLOSED_MAX_MM = 150.0   # ...and the other side at most this much
 GAP_MIN_ANGLE_FROM_FWD_DEG = 1.0   # rays closer to dead-ahead than this are skipped (sin ~ 0)
 GAP_FIT_AGREE_DEG = 2.0     # the two side walls are parallel: fitted tilts must agree within this
 
-# Checkpoint E PROPOSAL (awaiting approval; default False = decision #4, yaw 0):
+# Checkpoint E, P2 (decision #85, approved; replaces decision #4's yaw 0 for x / y / seats):
 # take the robot's yaw from the direction test's wall fit (already used for the
 # tracker's starting heading, #35) for x, y and the seat check too. Found in the
 # closed-loop simulation: with yaw 0, y is off by ~15 mm per degree of
 # placement yaw (84 mm at 5.5 deg), which later moves the camera's box off pillars.
-INIT_USE_WALL_YAW = False
+INIT_USE_WALL_YAW = True
 
 # y: front-wall fan -- lane_init.measure_y().
 FRONT_FAN_HALF_DEG = 30.0   # returns within +/- this of 0 deg are considered
@@ -184,7 +187,9 @@ CAMERA_TIME_OFFSET_S = 0.0
 COLOR_ID_WINDOW_S = 0.3
 COLOR_ID_MAX_ATTEMPTS = 5
 # Classification (15.4) -- PLACEHOLDERS until real-lighting calibration.
-COLOR_ID_MIN_FRACTION = 0.30        # winning colour's share of the ROI's pixels
+# Checkpoint E, P3 (decision #86, approved): 0.30 -> 0.20. At close range the ROI is 1.5 x the pillar, so
+# a centred pillar fills ~44 % of it and a few degrees of yaw took it under 30 % (docs/CHANGES.md 16.12).
+COLOR_ID_MIN_FRACTION = 0.20        # winning colour's share of the ROI's pixels
 COLOR_ID_MARGIN_RATIO = 2.0         # ... and at least this many times the other colour's
 COLOR_ID_ROI_MARGIN_FACTOR = 1.5    # ROI = the pillar's projected box widened by this
 # OpenCV HSV (H 0-179, S and V 0-255). Red wraps around 0/180.

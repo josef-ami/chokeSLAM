@@ -128,7 +128,7 @@ def measure_x(points: Iterable, direction: str,
 
 def measure_y(points: Iterable, yaw_deg: float = 0.0) -> YReading:
     """yaw_deg: the robot's yaw from the lane's grid north (clockwise). 0 = the
-    approved assumption (#4); checkpoint E's INIT_USE_WALL_YAW passes the wall
+    assumption of decision #4; with INIT_USE_WALL_YAW (decision #85) it is the wall
     fit's yaw, so each return's along-lane distance is taken along the LANE."""
     fan = []
     for p in points:
@@ -170,7 +170,7 @@ def initialise(points: Iterable, params: so.DetectParams | None = None) -> InitR
     xr = measure_x(pts, d.direction, walls=(d.left.fit, d.right.fit))
     yaw = 0.0
     if config.INIT_USE_WALL_YAW and d.wall_angle_deg is not None:
-        # checkpoint E proposal (INIT_USE_WALL_YAW, default off = decision #4): use the wall fit's
+        # checkpoint E, P2 (INIT_USE_WALL_YAW, decision #85, approved): use the wall fit's
         # yaw for x, y and the seats too, not only for the tracker's starting heading
         yaw = -d.wall_angle_deg
         if xr.ok:

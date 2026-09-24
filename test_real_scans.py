@@ -84,9 +84,16 @@ def test_2026_09_23_pillar_beside():
         pillar_side = d.left if sign == 1 else d.right
         other = d.right if sign == 1 else d.left
         assert pillar_side.opening_mm >= 700 and other.opening_mm <= 150, (pillar_side.opening_mm, other.opening_mm)
-        # the LIDAR was at y ~1464; the pose point is LIDAR_OFFSET_FORWARD_MM behind it (checkpoint E:
-        # the rear-axle midpoint, 134.6 mm behind the LIDAR per the CAD model)
-        assert abs(res.y.y_mm - (1464 - config.LIDAR_OFFSET_FORWARD_MM)) < 20, res.y.y_mm  # fan reads the wall ahead
+        # the LIDAR's y: 1464 with yaw taken as 0 (decision #4); 1436 with the wall fit's yaw (-3.5 deg here,
+        # decision #85), which measures the wall ahead along the LANE instead of along the tilted robot
+        # (the yaw-0 reading is ~8 mm per degree too long on this scan). The pose point (checkpoint E: the
+        # rear-axle midpoint) is the lever arm, rotated by the yaw, behind it.
+        y_sensor = 1436.0 if config.INIT_USE_WALL_YAW else 1464.0
+        assert abs(res.y.y_sensor_mm - y_sensor) < 20, res.y.y_sensor_mm       # fan reads the wall ahead
+        import math
+        c, s_ = math.cos(math.radians(res.yaw_deg)), math.sin(math.radians(res.yaw_deg))
+        assert abs(res.y.y_mm - (res.y.y_sensor_mm - config.LIDAR_OFFSET_FORWARD_MM * c
+                                  - config.LIDAR_OFFSET_LATERAL_MM * s_)) < 1e-6, res.y.y_mm
         results[sign] = res
     # mirror consistency: flipping the sign flips the answer, and nothing else
     assert {results[1].direction.direction, results[-1].direction.direction} == {"CCW", "CW"}
