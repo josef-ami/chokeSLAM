@@ -78,6 +78,110 @@ def concat_paths(paths) -> vp.Path:
     return vp.Path(prims, float(S[-1, 4]), S, wps, {"parts": len(paths)})
 
 
+# -- planning requests, shared by Mission and plan_preview (checkpoint F2), so the
+# dashboard's preview is exactly what the mission would plan from the same state --------
+def view_goals(lane_index: int, d: str):
+    slot = lane_index % 4
+    return [fm.lane_pose(slot, x, config.VIEW_Y_MM, 0.0, d) for x in config.VIEW_X_MM]
+
+
+def lap1_request(d: str, tab: dict, slot: int, y: float, target_lane: int):
+    """(world, goals, checkpoints, slots) for a lap-1 plan from lane `slot` at lane y
+    to the viewing pose of `target_lane`."""
+    slots = {slot, (slot + 1) % 4}
+    world = fm.build_world(d, tab, slots)
+    cps = [fm.checkpoint(slot, d)] if y < 1500.0 - 1.0 else []
+    # forward only: every other lane's midline (and this lane's once it is behind) may not be
+    # crossed, so a lane plan can never go the wrong way round the island (found in simulation)
+    for k in range(4):
+        if k != slot or not cps:
+            a, b = fm.checkpoint(k, d)
+            world.gates.append(fm.Gate(a, b, ("no_reverse", k)))
+    return world, view_goals(target_lane, d), cps, slots
+
+
+def final_world(d: str, tab: dict, finish: bool = False):
+    side_free = (lambda slot, y: slot == 0 and y > 1000.0 + 1.0) if finish else None
+    return fm.build_world(d, tab, range(4), side_free=side_free)
+
+
+def finish_goals(d: str):
+    out = []
+    for y in (1450.0, 1300.0, 1600.0):
+        for x in (500.0, 350.0, 650.0):
+            if (y - config.OUTLINE_REAR_MM >= 1000.0 + config.FINISH_MARGIN_MM
+                    and y + config.OUTLINE_FRONT_MM <= 2000.0 - config.FINISH_MARGIN_MM):
+                out.append(fm.lane_pose(0, x, y, 0.0, d))
+    return out
+
+
+def laps_left_and_cps(d: str, lane_index: int, y: float):
+    """How many V0 arrivals are still ahead, and the checkpoints (midlines) still
+    to cross before the next one."""
+    slot = lane_index % 4
+    cps = [fm.checkpoint(k, d) for k in range(slot, 4) if k > slot or y < 1500.0 - 1.0]
+    # V0 arrivals are at lane indices 8 (end of lap 2) and 12 (end of lap 3)
+    laps_left = 2 if lane_index < 8 else (1 if lane_index < 12 else 0)
+    return laps_left, cps
+
+
+def plan_with_retry(world, start, goals, checkpoints):
+    """vp.plan, and once more with less inflation / clearance. (path, None) or (None, error text)."""
+    try:
+        return vp.plan(world, start, goals, checkpoints), None
+    except vp.PlanError as e:
+        first = str(e)
+    try:
+        return vp.plan(world, start, goals, checkpoints, inflation=config.PLAN_INFLATION_MM - 15.0,
+                       clearance=config.PLAN_CLEARANCE_MM / 2.0), None
+    except vp.PlanError as e:
+        return None, f"{first}; retried with less inflation / clearance: {e}"
+
+
+@dataclass
+class Preview:
+    ok: bool
+    what: str                          # what was planned, or why nothing was
+    path: object = None                # vp.Path
+    world: object = None               # the WorldMap it was planned in
+    goals: list = field(default_factory=list)
+
+
+def plan_preview(d: str, tab: dict, pose, slot: int, lane_index: int, y: float) -> Preview:
+    """What the mission would plan if it looked from this state now (lap 1: to the
+    next lane's viewing pose; laps 2-3: the rest of the round and the finish).
+    Takes a snapshot, not the tracker, so it can run outside the tracker's lock."""
+    if lane_index < 4:
+        target = lane_index + 1
+        world, goals, cps, _ = lap1_request(d, tab, slot, y, target)
+        path, err = plan_with_retry(world, pose, goals, cps)
+        if path is None:
+            return Preview(False, f"lap 1 -> lane {target}: {err}", None, world, goals)
+        return Preview(True, f"lap 1 -> viewing pose of lane {target}: {path.length:.0f} mm", path, world, goals)
+    world = final_world(d, tab)
+    laps_left, cps = laps_left_and_cps(d, lane_index, y)
+    V0 = fm.lane_pose(0, config.VIEW_X_MM[0], config.VIEW_Y_MM, 0.0, d)
+    parts, fstart = [], pose
+    if laps_left > 0:
+        first, err = plan_with_retry(world, pose, [V0], cps)
+        if first is None:
+            return Preview(False, f"laps -> V0: {err}", None, world, [V0])
+        parts.append(first)
+        if laps_left > 1:
+            lap, err = plan_with_retry(world, V0, [V0], [fm.checkpoint(k, d) for k in range(4)])
+            if lap is None:
+                return Preview(False, f"full lap: {err}", None, world, [V0])
+            parts.append(lap)
+        fstart = V0
+    fin, err = plan_with_retry(final_world(d, tab, finish=True), fstart, finish_goals(d), [])
+    if fin is None:
+        return Preview(False, f"finish: {err}", None, world, finish_goals(d))
+    parts.append(fin)
+    path = concat_paths(parts)
+    return Preview(True, f"laps: {laps_left} lap part(s) + finish, {path.length:.0f} mm", path, world,
+                   [V0] + finish_goals(d))
+
+
 class Mission:
     def __init__(self, trk, log=None):
         self.trk = trk
@@ -100,6 +204,8 @@ class Mission:
         self.reverse_from = 0.0
         self.reverses = 0
         self.reverses_here = 0
+        self.last_world = None            # the world and goals of the latest plan (dashboard)
+        self.last_goals = []
         self._log = log
 
     # -- helpers ------------------------------------------------------------------
@@ -109,8 +215,7 @@ class Mission:
             self._log(f"[mission {t:7.2f}] {kind}: {detail}")
 
     def _view_goals(self, lane_index: int):
-        slot = lane_index % 4
-        return [fm.lane_pose(slot, x, config.VIEW_Y_MM, 0.0, self.d) for x in config.VIEW_X_MM]
+        return view_goals(lane_index, self.d)
 
     def _seat_snapshot(self, slots):
         tab = fm.seat_table_from_tracker(self.trk)
@@ -118,6 +223,7 @@ class Mission:
 
     def _plan(self, t, world, start, goals, checkpoints):
         self.plans += 1
+        self.last_world, self.last_goals = world, goals
         try:
             return vp.plan(world, start, goals, checkpoints)
         except vp.PlanError as e:
@@ -139,16 +245,10 @@ class Mission:
         return fm.build_world(self.d, fm.seat_table_from_tracker(self.trk), slots), slots
 
     def _plan_lap1(self, t) -> bool:
-        world, slots = self._lap1_world()
+        world, goals, cps, slots = lap1_request(self.d, fm.seat_table_from_tracker(self.trk), self.trk.slot,
+                                                self.trk.y, self.target_lane)
         start = fm.tracker_pose(self.trk)
-        cps = [fm.checkpoint(self.trk.slot, self.d)] if self._midline_ahead() else []
-        # forward only: every other lane's midline (and this lane's once it is behind) may not be
-        # crossed, so a lane plan can never go the wrong way round the island (found in simulation)
-        for k in range(4):
-            if k != self.trk.slot or not cps:
-                a, b = fm.checkpoint(k, self.d)
-                world.gates.append(fm.Gate(a, b, ("no_reverse", k)))
-        path = self._plan(t, world, start, self._view_goals(self.target_lane), cps)
+        path = self._plan(t, world, start, goals, cps)
         if path is None:
             return False
         self.path = path
@@ -208,18 +308,10 @@ class Mission:
 
     # -- laps 2-3 -----------------------------------------------------------------
     def _final_world(self, finish: bool = False):
-        tab = fm.seat_table_from_tracker(self.trk)
-        side_free = (lambda slot, y: slot == 0 and y > 1000.0 + 1.0) if finish else None
-        return fm.build_world(self.d, tab, range(4), side_free=side_free)
+        return final_world(self.d, fm.seat_table_from_tracker(self.trk), finish)
 
     def _finish_goals(self):
-        out = []
-        for y in (1450.0, 1300.0, 1600.0):
-            for x in (500.0, 350.0, 650.0):
-                if (y - config.OUTLINE_REAR_MM >= 1000.0 + config.FINISH_MARGIN_MM
-                        and y + config.OUTLINE_FRONT_MM <= 2000.0 - config.FINISH_MARGIN_MM):
-                    out.append(fm.lane_pose(0, x, y, 0.0, self.d))
-        return out
+        return finish_goals(self.d)
 
     def _plan_laps(self, t, start, laps_left: int, cps_now) -> bool:
         """Path: start -> V0 (checkpoints cps_now), then laps_left - 1 more full laps, then the finish."""
@@ -250,14 +342,7 @@ class Mission:
         return True
 
     def _laps_left_and_cps(self):
-        """From the tracker: how many V0 arrivals are still ahead, and the checkpoints
-        (midlines) still to cross before the next one."""
-        li, y = self.trk.lane_index, self.trk.y
-        slot = li % 4
-        cps = [fm.checkpoint(k, self.d) for k in range(slot, 4) if k > slot or y < 1500.0 - 1.0]
-        # V0 arrivals are at lane indices 8 (end of lap 2) and 12 (end of lap 3)
-        laps_left = 2 if li < 8 else (1 if li < 12 else 0)
-        return laps_left, cps
+        return laps_left_and_cps(self.d, self.trk.lane_index, self.trk.y)
 
     # -- main --------------------------------------------------------------------------
     def update(self, t: float, v_meas: float = 0.0) -> DriveCmd:

@@ -53,12 +53,14 @@ def test_mock_end_to_end():
     assert c.post("/api/mock", json={"direction": "sideways"}).status_code == 400
     r = c.post("/api/initialise").get_json()
     assert r["ok"], r
-    lanes_seen, worst, turns_seen = [], 0.0, 0
+    lanes_seen, worst, turns_seen, previews = [], 0.0, 0, []
     t0 = time.time()
     while time.time() - t0 < 40:
         time.sleep(0.2)
         st = c.get("/api/state").get_json()
         lanes_seen.append(len(st["lanes"]))
+        if st.get("plan"):
+            previews.append(st["plan"])
         a, b = st["robot"], st["truth"]["robot"]
         worst = max(worst, math.hypot(a["X"] - b["X"], a["Y"] - b["Y"]))
         if st["truth"]["finished"]:
@@ -102,6 +104,14 @@ def test_mock_end_to_end():
                              timeout=120).stdout
     replay = [ln.split("turn", 1)[1].strip() for ln in out.splitlines() if " turn " in ln]
     assert replay == [e.detail for e in turns], (replay[:2], [e.detail for e in turns][:2])
+    # checkpoint F2: the planner preview, re-planned continuously from the tracked pose
+    # (this mock's robot drives a scripted route, not the planner's, so many previews find no path from
+    # where it is; what is checked is that the preview follows the tracker and draws what it plans)
+    ok_prev = [p for p in previews if p["ok"] and p["source"] == "preview" and len(p["path"]) > 10]
+    kinds = {p["what"].split(":")[0].split(" ->")[0] for p in previews}
+    whats = {p["what"] for p in previews}
+    assert len(previews) >= 10 and len(whats) >= 3 and ok_prev and "lap 1" in kinds, (len(previews), kinds)
+    assert all(len(p["goals"]) >= 1 and p["path"][0] for p in ok_prev)
     # Re-initialise: everything starts again from lane 1
     old = st["init_id"]
     assert c.post("/api/initialise").get_json()["ok"]
@@ -110,7 +120,8 @@ def test_mock_end_to_end():
     print(f"PASS  test_mock_end_to_end          CW, start lane slot 1, 3 laps at 4x: lanes appeared one per turn "
           f"(1 -> 4), 12 turns, {decided} seat verdicts, 0 disagree with the truth; pillar colours {col_right} right, "
           f"0 wrong, {col_other} unknown; drawn robot within "
-          f"{worst:.1f} mm of the true one; stream serves the state; Save run replays to the same 12 turns; "
+          f"{worst:.1f} mm of the true one; planner preview re-planned as it drove ({len(whats)} different "
+          f"results, {len(ok_prev)} drawn paths, {sorted(kinds)}); stream serves the state; Save run replays to the same 12 turns; "
           f"Re-initialise starts over at lane 1")
     return rt
 
@@ -120,7 +131,9 @@ def test_tuning(rt):
     c = ds.app.test_client()
     groups = c.get("/api/tuning").get_json()["groups"]
     assert [g["group"] for g in groups] == ["LIDAR mount + calibration", "Initialisation thresholds",
-                                            "Tracker + IMU", "Seat detector"], groups
+                                            "Tracker + IMU", "Seat detector", "Steering + drive firmware (STM32)",
+                                            "Planner", "Mission + speeds", "Path follower",
+                                            "Run control (start button)", "Pillar colour + camera"], groups
     n = sum(len(g["params"]) for g in groups)
     assert all(p["meaning"] and p["when"] for g in groups for p in g["params"])
     r = c.post("/api/param", json={"name": "TURN_MIN_DEG", "value": "50"}).get_json()
@@ -129,15 +142,88 @@ def test_tuning(rt):
     assert c.post("/api/param", json={"name": "GAP_OPEN_MIN_MM", "value": "abc"}).status_code == 400
     assert c.post("/api/param", json={"name": "GAP_OPEN_MIN_MM", "value": "nan"}).status_code == 400
     assert c.post("/api/param", json={"name": "NOPE", "value": 1}).status_code == 400
+    # checkpoint F2 kinds: bool, list (shape-checked), str options
+    assert c.post("/api/param", json={"name": "RECHECK_EXTEND", "value": "false"}).get_json()["ok"]
+    assert config.RECHECK_EXTEND is False
+    assert c.post("/api/param", json={"name": "RECHECK_EXTEND", "value": "maybe"}).status_code == 400
+    assert c.post("/api/param", json={"name": "VIEW_X_MM", "value": "[450, 300]"}).get_json()["ok"]
+    assert config.VIEW_X_MM == (450, 300)
+    assert c.post("/api/param", json={"name": "COLOR_RED_HUE", "value": "[1, 2]"}).status_code == 400
+    assert c.post("/api/param", json={"name": "COLOR_RED_HUE", "value": "[[0, 12], [168, 179]]"}).get_json()["ok"]
+    assert config.COLOR_RED_HUE == ((0, 12), (168, 179))
+    assert c.post("/api/param", json={"name": "FOLLOWER_MODE", "value": "pp"}).get_json()["ok"]
+    assert c.post("/api/param", json={"name": "FOLLOWER_MODE", "value": "fast"}).status_code == 400
+    tl = [p for g in c.get("/api/tuning").get_json()["groups"] for p in g["params"] if p["name"] == "VIEW_X_MM"][0]
+    assert tl["text"] == "[450, 300]" and tl["changed"], tl
     assert c.post("/api/param", json={"name": "angular_margin_deg", "value": 5}).get_json()["ok"]
     assert rt.trk.params.angular_margin_deg == 5.0                 # reaches the running tracker
     changed = [p["name"] for g in c.get("/api/tuning").get_json()["groups"] for p in g["params"] if p["changed"]]
-    assert sorted(changed) == ["TURN_MIN_DEG", "angular_margin_deg"], changed
+    assert sorted(changed) == ["COLOR_RED_HUE", "FOLLOWER_MODE", "RECHECK_EXTEND", "TURN_MIN_DEG", "VIEW_X_MM",
+                               "angular_margin_deg"], changed
     assert c.post("/api/tuning/reset").get_json()["restored"] == n
     assert config.TURN_MIN_DEG == 45.0 and rt.seat_params.angular_margin_deg == 4.0
-    print(f"PASS  test_tuning                   4 groups, {n} parameters, each with its meaning and when it applies; "
-          f"bad values refused; a live seat-detector edit reaches the running tracker; changed values are "
-          f"flagged; Reset restores config.py")
+    assert config.VIEW_X_MM == (500.0, 350.0, 650.0) and config.RECHECK_EXTEND is True and config.FOLLOWER_MODE == "rwf"
+    print(f"PASS  test_tuning                   10 groups, {n} parameters, each with its meaning and when it applies; "
+          f"bad values refused (numbers, booleans, list shapes, options); a live seat-detector edit reaches the "
+          f"running tracker; changed values are flagged; Reset restores config.py")
+
+
+def test_mission_mock():
+    """Mission mode on the simulated car (mission_sim): the planner preview at
+    rest, the virtual start button, the mission's own path while it runs, a
+    firmware value edited live reaching the STM32's echo, stop, carry back,
+    re-initialise, a new layout."""
+    import dashboard_server as ds
+    rt = ds.create_mission_runtime("mock", seed=3)
+    c = ds.app.test_client()
+
+    def wait(pred, secs, what):
+        t0 = time.time()
+        while time.time() - t0 < secs:
+            st = c.get("/api/state").get_json()
+            if pred(st):
+                return st
+            time.sleep(0.1)
+        raise AssertionError(f"timed out waiting for {what}: {st.get('mission')} {st.get('plan') and st['plan']['what']}")
+
+    assert c.post("/api/initialise").get_json()["ok"] is False           # runs come from the button here
+    st = wait(lambda s: s["mission"]["ready"] and s.get("plan") and s["plan"]["ok"], 10, "READY + preview")
+    assert st["mode"] == "mission-mock" and st["plan"]["source"] == "preview" and st["tracking"]
+    assert st["plan"]["what"].startswith("lap 1 -> viewing pose of lane 1") and len(st["plan"]["goals"]) == 3
+    assert st["mission"]["run_state"] == "READY" and st["truth"] is not None
+    # the firmware values reach the (simulated) STM32; an edit is echoed within a second
+    assert st["fw_params"]["mismatch"] == [], st["fw_params"]
+    assert c.post("/api/param", json={"name": "SERVO_STRAIGHT_DEG", "value": 78.0}).get_json()["ok"]
+    wait(lambda s: s["fw_params"]["values"]["SERVO_STRAIGHT_DEG"]["stm32"] == 78.0, 3, "the STM32 echo")
+    assert c.post("/api/tuning/reset").get_json()["ok"]
+    wait(lambda s: s["fw_params"]["values"]["SERVO_STRAIGHT_DEG"]["stm32"] == config.SERVO_STRAIGHT_DEG, 3, "reset echo")
+    # press: the run starts; the page then shows the mission's own path
+    assert c.post("/api/mission/press").get_json()["ok"]
+    st = wait(lambda s: s["mission"]["run_state"] == "RUNNING" and s.get("plan") and s["plan"]["source"] == "mission",
+              10, "the mission's path")
+    assert st["mission"]["run_id"] == 1 and st["mission"]["phase"] in ("LAP1", "LOOK") and len(st["plan"]["path"]) > 10
+    st = wait(lambda s: s["tracker"] and s["tracker"]["lane_index"] >= 1, 30, "lane 2")
+    whats = {st["plan"]["what"]}
+    st = wait(lambda s: s["plan"]["what"] not in whats, 20, "a new plan")
+    # press again: STOPPED, the motor off
+    assert c.post("/api/mission/press").get_json()["ok"]
+    st = wait(lambda s: s["mission"]["run_state"] == "STOPPED" and s["mission"]["runs"], 3, "STOPPED")
+    assert st["mission"]["runs"] == [[1, "stopped"]], st["mission"]["runs"]
+    # carried back: not ready while moving, then re-initialised with a preview again
+    assert c.post("/api/mission/carry").get_json()["ok"]
+    wait(lambda s: not s["mission"]["ready"], 3, "not ready while carried")
+    st = wait(lambda s: s["mission"]["ready"] and s.get("plan") and s["plan"]["source"] == "preview", 10, "READY again")
+    assert st["tracker"]["lane_index"] == 0
+    # a new layout
+    r = c.post("/api/mission/layout", json={"direction": "CW", "seed": 5}).get_json()
+    assert r["ok"] and r["layout"].startswith("CW"), r
+    st = wait(lambda s: s["mission"]["ready"] and s.get("direction") == "CW", 10, "READY on the new layout")
+    assert c.post("/api/mission/layout", json={"direction": "UP"}).status_code == 400
+    rt.sim.stop()
+    print("PASS  test_mission_mock             mission mode on the simulated car: READY at rest with the planner "
+          "preview (lap 1 -> lane 1, 3 goals); firmware values echoed by the STM32, a live edit and Reset reach it; "
+          "the start button runs the mission and the page shows the mission's own path, re-drawn on new plans; "
+          "a second press stops it; carried back -> READY with a new preview; a new layout (CW) initialises")
 
 
 def test_lagging_loop():
@@ -336,6 +422,7 @@ if __name__ == "__main__":
         sys.exit(0)
     rt = test_mock_end_to_end()
     test_tuning(rt)
+    test_mission_mock()
     test_lagging_loop()
     test_real_mode_with_stand_in_hardware()
     print("\nAll dashboard checks passed.")

@@ -1,334 +1,178 @@
-> **Note (September 2026):** this README describes the design as it was *before* the changes recorded in [docs/CHANGES.md](docs/CHANGES.md): clockwise angles, lane-only initialisation, the CW/CCW gap test, IMU tracking with the de-skewed entry re-check, the lane-by-lane dashboard, pillar colour from the camera (checkpoint D), and the connection to the visibility-graph path planner with the drive link, drive firmware and closed-loop rulebook simulation (checkpoint E: `run_mission.py`, `mission.py`, `vg_planner.py`, `sim_closed_loop.py`). Files it mentions such as `localization.py` and `scan_prediction.py` have been deleted. Where the two disagree, docs/CHANGES.md is current.
+# chokeSLAM: WRO 2026 Future Engineers, obstacle challenge
 
-# WRO Obstacle Challenge broadside localization + dashboard
+chokeSLAM is the software of our self-driving car for the **WRO 2026 Future Engineers** obstacle challenge. The car must drive three laps of the 3 × 3 m track, pass every red pillar on its right and every green pillar on its left, and stop in the start section.
 
-Implements the wall-referenced localization design from our earlier
-discussion: a one-time start-of-run broadside LIDAR fix, re-anchored after
-each corner turn (once safely clear of the corner, see below), fused with
-continuous encoder+IMU dead reckoning between fixes. Includes a live
-Flask dashboard that draws the mat to scale with the classified point cloud
-and estimated pose overlaid.
+**The approach:**
+- **Lap 1:** the car localizes itself lane by lane and plans a path through each lane as it discovers the pillars.
+- **Laps 2 and 3:** it plans one optimised path from the map built on lap 1 and follows it twice.
 
-Everything here was built and tested in a sandbox with **no hardware and no
-network access to PyPI**, so it runs in two modes:
+- **Calibrating and running it on the car:** [docs/RUNNING_ON_THE_ROBOT.md](docs/RUNNING_ON_THE_ROBOT.md), the complete guide: wiring, firmware, Pi setup, every calibration in order with its tool and acceptance check, practice with the live dashboard, competition start, troubleshooting.
+- **Design, every decision and the evidence for it:** [docs/CHANGES.md](docs/CHANGES.md) (checkpoints A–F).
 
-- **mock** (default) -- a simulated robot + world, ray-cast LIDAR, noisy
-  odometry. No hardware needed. This is what's been tested.
-- **real** -- talks to an actual RPLidar C1 via the `rplidarc1` package.
-  Written directly from that package's published API docs, but **could not
-  be run against real hardware in this session** -- sanity check it against
-  your existing `lidar_probe.py` experience before trusting it.
+![Two simulated rounds](docs/checkpoint_e_runs.png)
 
-## Quick start (mock mode)
+*Two simulated rounds on rulebook layouts: planned paths in grey, the driven path in blue, pass-side lines dotted.*
 
-```
-pip install -r requirements.txt   # just flask + numpy for mock mode
-python3 dashboard_server.py
-```
+---
 
-Open `http://localhost:5056/`. You'll see the mat, the 24 placeholder
-slots, four demo pillars, the live classified point cloud, and both the
-estimated pose (solid blue) and simulated ground truth (grey outline) --
-they should track closely, with visible small corrections each time the
-robot passes through a corner.
+## Contents
 
-## Files
+1. [How it works](#1-how-it-works)
+2. [Hardware and how the software uses it](#2-hardware-and-how-the-software-uses-it)
+3. [Code modules](#3-code-modules)
+4. [Build, compile and upload](#4-build-compile-and-upload)
+5. [Testing and simulation](#5-testing-and-simulation)
+6. [Status and known limits](#6-status-and-known-limits)
 
+---
+
+## 1. How it works
+
+### Localization (checkpoints A–D)
+- **Initialisation.** One LIDAR scan, taken standing still at the start. It decides:
+  - the round direction (CW or CCW), from which side has the opening past the island's end;
+  - x, the distance from the outer wall, from the fitted side walls;
+  - y, the distance along the lane, from the wall ahead, measured along the lane using the fitted yaw;
+  - which of the lane's six pillar seats hold a pillar.
+- **Tracking.** After that, the pose comes from the STM32's IMU heading and wheel encoder at 100 Hz. The tracker works in one frame per lane (x from the outer wall, y along travel) and switches frames at each corner.
+- **Seat checks.** On lap 1, each new lane's seats are checked with the LIDAR as the car enters the lane. The LIDAR frames are de-skewed for the car's motion.
+- **Colours.** The fisheye camera reads the colour of every pillar the LIDAR found.
+
+### Planning and driving (checkpoint E)
+- **Planner.** A visibility-graph planner works in one frame for the whole loop:
+  - pillars and the parking-lot limitations are inflated obstacles;
+  - a line from each pillar to the wall on its forbidden side enforces the pass side;
+  - Dijkstra finds the shortest route and smooths corners with arcs the steering can actually make;
+  - the car's real footprint is checked along the whole path.
+- **Lap 1.** At each corner the car stops briefly while the LIDAR and camera decide the next lane, plans that lane, and drives it. It re-plans whenever a seat or a colour changes, stops to look again at a pillar whose colour is unknown, and backs up if no forward path exists.
+- **Laps 2–3.** One final map, one closed lap path followed twice, then a stop inside the start section.
+- **Driving.** The Pi closes the loop: a rear-wheel-feedback controller follows the path using the tracker's pose. It sends a steering angle and a speed to the STM32 50 times a second. The STM32 drives the servo and the motor's speed loop, and stops the motor if the Pi goes quiet for 250 ms.
+- **Practice dashboard (checkpoint F2).** A browser page (`run_mission.py --dashboard` on the car, or a simulated car) draws the lanes, seats, colours and pose, and **continuously the path the planner builds from what has been perceived**. Its tuning panel changes 110 values live, including the STM32's servo map, steering lock and speed loop (no re-flash).
+- **The run (checkpoint F).** The STM32 owns the start button: a press starts a run, a press during a run stops it, and a press after a run has stopped or finished starts a new one. Between runs the Pi re-initialises whenever the car stands still, and the STM32's LED shows when a press will start.
+
+## 2. Hardware and how the software uses it
+
+Component names are those in the CAD assembly (`ASMB.step`). Geometry was measured from the CAD model (CHANGES §16.3). The pose reference point is the rear-axle midpoint.
+
+| Component | Connected to | Used by | Role |
+|---|---|---|---|
+| Raspberry Pi 5 | – | `run_mission.py` and everything in §3 | localization, planning, path following |
+| RPLIDAR C1, mounted upside down, 134.6 mm ahead of the rear axle | Pi, USB serial | `lidar_source.py` | start scan, seat checks |
+| OV5647 fisheye camera, 139.9 mm ahead, 127 mm high | Pi, CSI (Picamera2) | `camera_source.py`, `color_id.py` | pillar colour (red / green) |
+| STM32F411 "Black Pill" | Pi, native USB (CDC) | `firmware/drive_bridge/` ↔ `stm32_link.py`, `drive_link.py`, `run_control.py` | sensor stream, steering and motor speed loop, watchdog, the run (start button), status LED (PC13) |
+| BNO08x IMU (Game Rotation Vector), SPI1 | STM32 | `$IMU` line → `lane_tracker.py` | heading |
+| GA25-370 gear motor with hall encoder (TIM5, PA0/PA1) | STM32 via BTS7960 H-bridge (PA2 / PA3) | `$IMU` line (distance), DRIVE frames (speed) | drive and odometry (14.853 ticks/cm) |
+| JX PS-1171MG steering servo (PA8, 500–2500 µs; straight 76.5°, stops 20° / 140°) | STM32 | DRIVE frames (road-wheel angle) | Ackermann steering, wheelbase 135.9 mm; full-lock radius 27 cm left / 25 cm right (from encoder + IMU); the lock angles used, 36.6° / 40.5°, are **placeholders** (CHANGES §17.2) |
+| Start button (PB12 to GND) | STM32 | run state in `$STA` → `run_control.py` | the one start button (rule 9.11): start / stop / restart |
+| XL4016 buck converter, battery | – | – | power |
+
+The pinout is the owner's `OpenRound.cpp`. The CAD model also contains VL53L0X distance sensors, a TCS34725 floor colour sensor (with a TCA9548A and LED2 / LED3) and an SSD1306 display. chokeSLAM does not use them.
+
+### Pi ↔ STM32 link
+- **STM32 → Pi**, text lines over USB:
+  - `$IMU,<seq>,<t_ms>,<enc>,<yaw>` at 100 Hz: raw yaw and the cumulative encoder count.
+  - `$STA,<seq_ack>,<status>,<run_state>,<run_id>,<pwm>,<speed_mmps>` at 20 Hz: status bits (enabled, watchdog, button, closed loop, IMU ok), the run (READY / RUNNING / STOPPED / FINISHED and a counter), and the motor PWM and measured speed.
+  - `$PAR,<id>,<value>`: the STM32's echo of a tuning value.
+  - `#` log lines when the run state changes.
+- **Pi → STM32**, binary 11-byte DRIVE frames (the spec in `stm_link.py`): sync, sequence, flags, road-wheel angle (+ = left), speed in mm/s, and an XOR checksum. A STOP frame stops the car. Two flag bits the spec leaves free carry PI_READY (a press may start a run) and RUN_OVER (the Pi's run has ended). An 8-byte PARAM frame (`AA 56`) sets the firmware's tuning values; the Pi keeps them equal to `config.py`.
+
+## 3. Code modules
+
+### Runs on the robot
 | File | What it does |
 |---|---|
-| `mat_geometry.py` | Field constants (outer size, lane width, island, 4 sections, 24 slots) and section-local <-> global coordinate conversion. **Verify `OUTER_SIZE_MM` against your actual mat** -- it was read off the mat artwork, not stated explicitly in the rules pages we reviewed. |
-| `scan_processing.py` | Turns a raw scan into classified wall/pillar clusters (arc-length threshold, not point count; total-least-squares line fit for a denoised, sub-single-ray perpendicular distance). |
-| `localization.py` | The broadside fix (front=outer wall; back is inferred from front, not read -- see below) and `PoseEstimator`, which fuses it with odometry. Also the one-time start-of-run fix (`compute_start_of_run_fix`, `candidate_start_positions`) -- see below. |
-| `lidar_source.py` | Real-hardware RPLidar C1 interface (untested, see above). |
-| `simulation.py` | Mock world + robot, used only in mock mode. |
-| `dashboard_server.py` | Flask app: runs the pipeline in a background thread, serves the dashboard over Server-Sent Events. |
-| `templates/dashboard.html` | The dashboard page (plain canvas, no external JS libraries). |
-| `config.py` | Everything you need to fill in / tune -- read it top to bottom before deploying. |
+| `run_mission.py` | **The competition program.** Opens the STM32 link, LIDAR and camera and runs `run_control` at 50 Hz until stopped; sends STOP on exit |
+| `run_control.py` | Start / stop / restart: re-initialises whenever the car stands still, reports ready, runs the mission while the STM32 says RUNNING, ends a run that finished |
+| `mission.py` | Mission state machine: look, plan, drive, reverse, laps 2–3, finish |
+| `vg_planner.py` | Visibility-graph planner: tangent arcs, arc-fit corners, lap checkpoints, footprint check |
+| `field_map.py` | The planner's world in the loop frame: pillars, pass-side lines, island, parking lot; tracker pose → loop frame |
+| `follower.py` | Path follower (rear-wheel feedback; pure pursuit as an option) and speed profile |
+| `lane_tracker.py` | Pose from the IMU and encoder, lane switching at corners, seat re-checks, colour requests |
+| `lane_init.py`, `direction_detect.py` | Initialisation: direction test, x, y, seats |
+| `seat_occupancy.py` | Pillar present / absent / unknown at each of a lane's six seats, from one LIDAR frame |
+| `color_id.py`, `camera_source.py` | Pillar colour from the fisheye camera |
+| `deskew.py`, `timing.py` | LIDAR de-skew and the common clock for LIDAR and STM32 data |
+| `lidar_source.py`, `scan_processing.py` | RPLIDAR C1 reader, calibration to the robot frame |
+| `stm32_link.py`, `drive_link.py`, `stm_link.py` | STM32 link: reads `$IMU` / `$STA`, sends DRIVE frames |
+| `lane_frame.py`, `mat_geometry.py`, `display.py` | Frames and field geometry |
+| `config.py` | **Every setting**: ports, calibration, car geometry, planner, mission and follower parameters, each commented |
 
-## What you need to fill in before running in "real" mode
+### Firmware (`firmware/`)
+| Folder | What it is |
+|---|---|
+| `drive_bridge/` | **The firmware for `run_mission.py`** (Arduino IDE): `$IMU` / `$STA` stream, the run and the start button, DRIVE execution, servo map, speed loop, watchdog. `drive_protocol.h` is the hardware-free part (host-tested) |
+| `stm32_imu_bridge/` | Sensor stream only (motor off): for tracking tests by hand |
+| `obstacle_round_stream/`, `chokeslam_stream/` | The earlier v7 firmware with the stream added, and the stream as a portable header (reference) |
 
-All in `config.py`:
+### Tools
+| File | What it does |
+|---|---|
+| `drive_calibrate.py` | Measures the motor: fits the speed loop's feed-forward from open-loop runs, checks the closed loop |
+| `run_init.py` | Initialisation from the real LIDAR, a saved scan or the simulator, with every intermediate number |
+| `run_track.py` | `--bench`: STM32 calibration check; `--real`: initialisation + tracking; `--replay-scan/--replay-imu`: replay a recorded run |
+| `measure_lidar_delay.py` | Measures the LIDAR vs STM32 time offset on the robot |
+| `camera_check.py` | Bench check of the camera mount and colour thresholds |
+| `dashboard_server.py` | Browser dashboard for practice: lanes, seats, colours, pose, live scan, the planned path (planner preview, or the mission's own path during a run), live tuning panel. Tracking mode (drive by hand) or mission mode (`--mission` in the mock, `run_mission.py --dashboard` on the car) |
+| `mission_sim.py` | The simulated car and STM32 the mission-mode mock and `test_run_control.py` run on |
+| `sim_closed_loop.py`, `sweep_closed_loop.py`, `layouts.py` | Closed-loop simulation of whole rounds on rulebook layouts (§5) |
+| `simulation.py`, `live_sim.py`, `camera_sim.py` | Simulated LIDAR, STM32 and camera |
+| `path_planner.py` | The original planner the checkpoint-E planner is built from (reference) |
 
-- `LIDAR_PORT`, `LIDAR_BAUDRATE` -- your serial device.
-- `LIDAR_ANGLE_SIGN`, `LIDAR_ANGLE_ZERO_OFFSET_DEG` -- calibrate these
-  against your actual mount (spin to a known heading, see what angle a
-  known object shows up at). The simulator sidesteps this by construction,
-  so it can't validate your real values for you.
-- `LIDAR_OFFSET_FORWARD_MM`, `LIDAR_OFFSET_LATERAL_MM` -- the lever-arm
-  offset from the LIDAR to your path planner's reference point, which you
-  said you already have measured.
-- `MODE = "real"` when you're ready to run on the robot.
+## 4. Build, compile and upload
 
-And in `dashboard_server.py`'s `_real_mode_loop()`: the actual wiring from
-your STM32 UART telemetry into `estimator.update_heading()` /
-`update_odometry()` / `on_corner_completed()`. That parsing lives on your
-Pi already and couldn't be written here without your protocol -- the
-integration points are commented inline.
+### STM32 firmware
+1. Arduino IDE with the **STM32duino** core, and the libraries *SparkFun BNO08x Cortex Based IMU* and *Servo*.
+2. Board: **Generic STM32F4 series → BlackPill F411CE**; USB support: **CDC (generic 'Serial' supersede U(S)ART)**; upload method: **STM32CubeProgrammer (DFU)**. Hold BOOT0 and tap NRST to enter DFU.
+3. Open `firmware/drive_bridge/drive_bridge.ino` (keep `drive_protocol.h` next to it), compile and upload.
 
-## Back reading dropped -- front-only lateral fix
+### Raspberry Pi
+```bash
+git clone https://github.com/josef-ami/chokeSLAM.git && cd chokeSLAM
+sudo apt install python3-opencv python3-picamera2
+pip install -r requirements.txt
+sudo usermod -aG dialout $USER          # serial-port access (log out and in)
+```
+Python needs no compiling. Set the ports in `config.py`, then follow [docs/RUNNING_ON_THE_ROBOT.md](docs/RUNNING_ON_THE_ROBOT.md): link checks, calibration in order (§6), practice with the dashboard (§7–8), and starting `run_mission.py` automatically at power-up for competition rounds (§9).
 
-Real hardware testing found the LIDAR's rear is permanently blocked by the
-robot's own chassis: a raw scan dump showed front, left, and right all
-resolving to clean, smooth wall returns close to their expected angles,
-while a ~105 degree arc centred almost exactly on 180 degrees
-robot-relative was all single-digit-millimetre readings -- the sensor
-pressed up against the chassis, not a wall. This isn't a near-corner
-artifact like the ones documented below; it's present everywhere on the
-mat, on every section, so `compute_broadside_fix()` (the original lateral
-fix, used after **every** corner turn, not just at start-of-run) could
-never have passed its old front+back≈1000mm check on this robot,
-regardless of calibration.
+### Without hardware
+```bash
+pip install -r requirements.txt
+python3 sim_closed_loop.py --seed 3 --noise moderate    # one simulated round
+python3 dashboard_server.py --mission                   # with config.MODE = "mock": http://localhost:5056/
+```
 
-Back is now **inferred** from front instead of independently read:
-`back_d = LANE_WIDTH_MM - front_d`, since the two have to sum to the lane
-width by definition of the lane. `compute_broadside_fix()` and
-`compute_start_of_run_fix()` both only search for a front wall cluster
-now (plus, for the latter, the two side rays -- unaffected, they're well
-clear of the blocked arc). This trades away the old front+back
-cross-check -- with back defined from front, that sum is now always
-exactly `LANE_WIDTH_MM`, not a real validation -- for a plausibility bound
-on front_d instead: a genuine outer-wall reading has to land inside the
-lane (`0 < front_d < LANE_WIDTH_MM`, with `LANE_WIDTH_TOLERANCE_MM` as
-noise margin either side). `BroadsideFix`/`StartOfRunFix` still report
-`back_distance_mm` and `lane_sum_mm` for the dashboard, just inferred
-rather than measured -- the dashboard now labels them as such rather than
-implying a live cross-check that isn't happening.
+## 5. Testing and simulation
 
-If the chassis is ever modified to give the LIDAR a clear line of sight
-behind -- even a narrow slot, the search window is only ±15 degrees --
-this is straightforward to revert: restore the `back = _find_wall_near(...)`
-search and the real front+back sum check in both functions (see git
-history prior to this change).
+Every module has a test suite (`test_*.py`); run each with `python3 test_<name>.py`. They are checked against independent geometry and ground truth rather than against the code itself. The real-hardware paths are tested through pseudo-terminals and stand-in drivers. The 23 September real scans are kept as regression tests (`test_data/`).
 
-## Start-of-run: resolving along-track position and the 4-leg ambiguity
+`sim_closed_loop.py` runs whole rounds with **the real code in the loop**:
+- layouts drawn exactly as the rulebook describes;
+- a simulated car (bicycle model with steering and speed lag);
+- simulated LIDAR, STM32 and camera;
+- a judge applying the rulebook: contact, wrong side, laps, finish, 3 minutes.
 
-The original design only ever resolved LATERAL (cross-lane) position from
-the broadside fix -- along-track position (`along_mm`, how far along the
-current section's edge you are) had to be typed in by hand
-(`initial_along_mm`), and which of the 4 sections (S/E/N/W) you're even on
-always has to be supplied (`initial_section`) -- neither is recoverable
-from the front reading alone.
+`test_run_control.py` runs start / stop / restart end to end: the firmware's run logic compiled from `drive_protocol.h`, in lockstep with the real Pi side on a simulated car.
 
-`compute_start_of_run_fix()` now also reads the LEFT (90 deg
-robot-relative) and RIGHT (270 deg) rays at the same one-time start-of-run
-moment. On every one of the 4 sections, a broadside robot's left/right axis
-runs exactly along the section's own along-track axis -- left always points
-toward the far corner, right toward the near corner (verified against
-`mat_geometry._section_axes` for all 4) -- so `along_mm = right_raw -
-LIDAR_OFFSET_LATERAL_MM`, cross-checked against `OUTER_SIZE_MM - left_raw -
-LIDAR_OFFSET_LATERAL_MM`, with a left+right≈`OUTER_SIZE_MM` sanity check
-(same spirit as the front plausibility bound above). This replaces the
-manual `initial_along_mm` guess with a real reading, for whichever section
-turns out to be the right one.
+`sweep_closed_loop.py` runs hundreds of these in parallel. Results on 200 layouts with the checkpoint-E placeholder steering lock (CHANGES §16.11); success is counted over runs that pass initialisation. **With the measured lock, success without noise drops from 100 % to 49 %** (§6 below):
 
-It still can't tell you *which* section that is -- that's the same
-unresolvable gap the front fix always had, just now stated for
-along-track too. `candidate_start_positions()` takes the along/lateral pair
-and expands it into all 8 dashboard markers: one for each of the 4 sections
-x 2 headings (the section's real broadside heading, and that +90 degrees,
-purely so the dashboard can show both axis orientations at every
-candidate) -- shown once at start-of-run so your team can visually confirm
-which one matches where the robot was actually placed. This is a
-one-time DISPLAY addition only: the live-tracked pose still needs
-`initial_section` supplied manually, same as before, now just auto-filled
-with a real `along_mm` instead of a guess.
+| Noise | Success |
+|---|---|
+| none | 100 % |
+| moderate (report preset) | 87 % |
+| moderate, encoder calibrated to 0.5 % | 97 % |
+| harsh (2 × moderate) | 45 % |
 
-**Read before relying on a specific starting spot.** Sweeping the mock
-simulator across along/lateral combinations (noiseless, to isolate the
-geometry from sensor noise) found the window where front, left, AND right
-*all* resolve cleanly is workable across much more of each section now
-that back is no longer part of the requirement -- e.g. at the lane's
-lateral centre (500mm from the outer wall) it's open for roughly
-70-650mm, 1380-1630mm, and 2880-2950mm along the section, versus only a
-single ~250mm window before. It's still not the WHOLE section, and still
-not simply "near the middle" -- at lateral=150mm it didn't open anywhere
-in one sweep. Root cause for what's left: the near/far OUTER corners are
-real sharp 90-degree corners too, so a side ray taken too close to one
-still blends the perpendicular wall and the along-track wall into one
-continuously-curving return, the same corner-blending effect documented
-below for the back ray and the island -- clustering correctly refuses to
-call that flat, and this fix correctly rejects it (confirmed: no silent
-wrong answer), it's just a smaller effect now that only 3 of the 4
-original readings need to simultaneously avoid it instead of 4. Verify
-the workable range for your own geometry; `dashboard_server.py`'s mock
-demo overrides the simulator's own default starting `along_mm` (50.0,
-right next to a corner) for exactly this reason.
+**With the current lock placeholders** (36.6° / 40.5°, checkpoint F2, CHANGES §18.5), success is lower: 49 % with no noise, 39 % under moderate noise, 49 % with the encoder calibrated, and 74 % under moderate noise with `PLAN_RADIUS_FACTOR` 1.0. There are no wrong seats or colours in any of these; the limit is the planner with a weaker lock (§6).
 
-## Start-of-run candidate overlay (arrows + predicted LIDAR per leg)
+## 6. Status and known limits
 
-Once `compute_start_of_run_fix()` succeeds, the dashboard now draws, for each
-of the 8 candidates (`candidate_start_positions()` -- 4 legs x 2 axes), a
-colour-coded arrow AND that pose's **predicted LIDAR scan** superimposed on
-the mat: what the sensor *would* see if the robot were at that pose,
-ray-cast against the known walls + island by `scan_prediction.predict_scan_global()`.
-Each leg gets one colour (Okabe-Ito, colourblind-safe) shared by its arrow and
-its predicted point cloud; the `START CANDIDATES` side panel lists all 8 with
-their `(x, y)` and bearing. Compare the predicted clouds against the single
-real start-of-run scan to pick which leg the robot is actually on -- that's
-the one whose prediction lines up with the live points.
+- **Not yet run on the car.** The drive firmware has been compiled only on a PC against stand-in headers, never with the STM32 toolchain or on the STM32. The speed-loop values are placeholders to measure (`drive_calibrate.py`, [docs/RUNNING_ON_THE_ROBOT.md](docs/RUNNING_ON_THE_ROBOT.md) §6).
+- **The steering lock is a placeholder.** 36.6° left / 40.5° right were converted from the 27 / 25 cm radii as if measured at the outer front wheel; the radii came from encoder and IMU data, so the real lock is probably smaller (31.8° / 34.3° at the outer rear wheel, 26.7° / 28.5° at the rear-axle midpoint). To be measured (CHANGES §17.2).
+- **The turning radius breaks many plans (decision pending).** With the placeholder lock (36.6° left, 40.5° right), 49 % of initialised simulated starts succeed without noise, compared with 100 % with the old placeholder. Mostly the planner loops round where a left corner is too tight, and `test_vg_planner.py`'s full-lap check fails. The options are in CHANGES §17.5.
+- **Initialisation refuses about 17 % of rulebook starts**, mostly CW starts where a pillar on the middle inner seat hides the opening past the island.
+- **About 3 % of starts have no path.** The car stands about 300 mm behind a pillar that must be passed on the far side.
+- **Heavy noise needs a pose correction during the laps.** Nothing corrects the pose after initialisation; that is by design so far.
+- **Parking is not implemented.** The car stops inside the start section.
+- `test_run_track.py` and `test_dashboard.py` need `LIDAR_TIME_OFFSET_S = 0` (their stand-in LIDAR doesn't apply the configured offset).
 
-The prediction models the **rear chassis blind arc** on purpose
-(`config.REAR_BLIND_ARC_CENTER_DEG` / `_WIDTH_DEG`, default 180 deg / 105 deg
-from the "Back reading dropped" section): the same wedge that's dead on real
-hardware is cut out of each prediction, so (a) a predicted cloud looks like a
-real return from this robot, not a full 360 deg sweep, and (b) the two heading
-variants at one leg differ (the blind wedge points a different way), making all
-8 overlays visually distinct. **Measure your unit's real blind wedge** off a
-raw scan dump (the empty angular gap in `_debug_dump_clusters` output) and set
-those two config values to match -- the defaults are the README's stated
-figures, not measured on your unit. Predictions are static (they depend only on
-the fixed candidate poses), so they're computed once at start-of-run and reused
-every frame -- not re-ray-cast at stream rate.
-
-### Start orientation: along the lane, facing the direction of travel
-
-The one-time start-of-run scan is taken with the robot in its REAL start
-orientation: **parallel to the walls, facing the direction of travel** (down
-the lane) -- NOT broadside. `compute_start_of_run_fix(clusters,
-driving_direction)` resolves position from that view:
-
-- The two **side rays** (90 deg = left, 270 deg = right) hit the OUTER and
-  INNER lane walls, so they give the **cross-lane** position and sum to
-  ~`LANE_WIDTH_MM` (~1000 mm). Which side is the outer wall is fixed by the
-  driving direction, not the leg: **CCW keeps the outer wall on the left**
-  (90 deg), CW on the right (270 deg).
-- The **forward ray** (0 deg, straight down the lane) gives the range to the
-  wall ahead, which resolves **along-track**: CCW -> `along = forward`,
-  CW -> `along = OUTER_SIZE_MM - forward`. Forward is taken as the median
-  range of the dead-ahead points (not a fitted wall), since straight down the
-  lane the return is usually a corner-blend, not a flat wall.
-
-Then `candidate_start_positions(along, lateral, driving_direction)` places all
-4 legs, each facing its **driving heading** (`driving_heading_deg()` -- the
-leg's broadside bearing turned 90 deg to run along the lane), plus the +90 deg
-variant.
-
-**Angle convention -- GRID BEARINGS.** All *world* headings (robot heading,
-`BROADSIDE_HEADING_DEG`, driving headings, candidate bearings, the dashboard's
-heading readout) are grid/compass bearings: **0 = grid north, 90 = east,
-clockwise**, matching a compass/IMU. So a robot facing grid north reads 0 deg
-(not 90). This is separate from the *robot-relative* LIDAR frame used by the
-fix, which is unchanged (0 = forward, 90 = left, 180 = back, 270 = right). The
-robot->world rotation converts once with `maths_angle = (90 - bearing)`; if you
-switch back and forth, that's the only relation you need. Because bearings run
-clockwise, the driving heading is `broadside + 90` for CCW and `broadside - 90`
-for CW (the opposite sign from a maths-angle convention). Feed a north-
-referenced IMU into `update_heading()` directly; add a fixed offset at that
-boundary only if your IMU's zero isn't grid north.
-
-This replaces an earlier version that assumed the robot faced the OUTER WALL
-(broadside) at start, which put the side rays down the lane and expected
-left+right ~= `OUTER_SIZE_MM` (~3000 mm). On the real robot the start
-orientation is along-the-lane, so that version rejected every real scan with
-"no wall cluster found for front". If the fix now reports
-`left+right ~= 3000` it means the robot is broadside instead of along the
-lane; ~1000 is the along-lane orientation it expects.
-
-**Valid start zone (unchanged constraint):** the island only faces the middle
-~1000-2000 mm of each 3000 mm edge, so the cross-lane fix only works when the
-robot starts in that middle band -- outside it, a side ray sails past the
-island's corner to a far wall and the lane-width check fails (correctly). You
-said the robot always starts in a working position; this is what "working"
-means geometrically.
-
-## Editable dashboard (live tuning + pose)
-
-The dashboard's **TUNING PARAMETERS** panel is fully editable at runtime -- no
-restart, no file edits. Every tuning constant (config.py, mat_geometry.py,
-scan_processing.py) and the live pose-estimation state are exposed as inputs
-that POST to the running server:
-
-- `GET /api/tuning` builds the panel from a registry that reads each value
-  live; `POST /api/param {name, value}` applies one edit; `POST /api/refit`
-  re-takes the start-of-run scan and rebuilds the fix + candidates + predicted
-  overlay with the current parameters; `POST /api/reset` restores the file
-  defaults captured at startup.
-- **Live vs re-run:** calibration (`LIDAR_ANGLE_*`) and clustering
-  (scan_processing) edits show up on the *next frame* -- watch the point cloud
-  rotate / re-classify as you type. The start-of-run candidates are static, so
-  click **Re-run start-of-run fix** to rebuild them after changing anything
-  that affects them (geometry, tolerances, blind arc, driving direction,
-  overlay density).
-- **Field geometry** edits (`OUTER_SIZE_MM`, `LANE_WIDTH_MM`,
-  `SAFE_FIX_MARGIN_MM`) re-derive the island + safe zone and redraw the mat;
-  the derived values are shown read-only.
-- **Pose estimate (live)** lets you set the estimator's `section`, `along_mm`,
-  `lateral_mm`, `heading_deg` directly. In mock mode the simulator overwrites
-  these every frame unless you tick `freeze_pose` (in real mode nothing feeds
-  the estimator here, so edits stick).
-- `MODE`, `DASHBOARD_HOST/PORT` are read-only (they need a restart to rebind).
-
-These are debug controls on a single-viewer local dashboard -- there's no
-auth; don't expose the port beyond your bench network.
-
-## Findings from actually building and testing this (read this part)
-
-A few things surfaced only once this got implemented and stress-tested in
-simulation, that weren't obvious from the design discussion alone:
-
-**The corner-turn fix needs to wait, not fire immediately.** The island is
-a plain inward offset of the outer square, so it only directly faces the
-*middle* portion of each 3000mm edge. Right at a corner-turn completion
-(along-track position ~0), a perpendicular "back" ray toward the island
-often sails past its corner and hits something much farther away instead of
-the island's near face -- the front+back sanity check correctly *rejects*
-this (confirmed: it never silently returns a bad answer), but that also
-means a fix attempted right at the corner will usually just fail outright.
-`PoseEstimator.in_safe_fix_zone()` tells you when you've driven far enough
-into the new section for the geometry to work; wait for it before going
-broadside. `mat_geometry.SAFE_FIX_MARGIN_MM` documents the margin and why
-it needs to be a few hundred mm, not a token amount.
-
-**The initial fix only resolves lateral position, not along-track
-position.** If you don't tell `PoseEstimator` roughly where along the
-starting section the robot was actually placed (`initial_along_mm`), your
-x/y estimate will be off by that amount until the first corner turn
-resynchronises along-track tracking to 0. The lateral (cross-lane) part is
-still correct from the start either way -- it's specifically the
-along-the-lane component that's affected.
-
-**Wall-cluster matching has to use the cluster's actual angular coverage,
-not its centroid angle.** A nearby, wide wall cluster can have a centroid
-several degrees away from where you'd naively expect, especially once it's
-been capped by `MAX_CLUSTER_SPAN_DEG` (added to stop a slowly-changing
-sequence of points chaining two unrelated, non-collinear surfaces -- e.g.
-a wall bending around a real corner -- into one cluster). Matching by "is
-the target bearing inside this cluster's span" instead of "is the centroid
-near the target" fixed a real bug where the correct wall was being found by
-the clustering step but then discarded by the matching step.
-
-**When two wall-like clusters both fall inside the search window, prefer
-the nearer one.** This happens near corners, where a true nearby surface
-and a much farther glimpsed-through-a-gap surface can both have a plausible
-centroid angle; nearest-wins is both simpler and physically correct (the
-sensor is blocked by whatever's actually closest).
-
-None of this needed a fundamentally different design from what we
-discussed -- it's all tuning/robustness that only shows up once you throw
-real (simulated) noisy geometry at it, which is exactly why it's called out
-here rather than left for you to rediscover.
-
-## Testing performed
-
-- Unit-level checks of clustering/classification/line-fit against
-  hand-computed expected values.
-- A ~600-simulated-second, multi-lap run (`python3` one-liners, not
-  committed as a test file -- ask if you want these turned into a proper
-  pytest suite) verifying: every broadside fix attempt in a valid position
-  succeeds with front+back within a few mm of 1000mm, and position error
-  converges to ~25mm and stays bounded across corners, vs. drifting
-  unbounded when fixes are skipped.
-- Playwright screenshot of the live dashboard confirming the point cloud
-  visually aligns with the drawn walls/island and the estimated/true
-  markers track together.
-- `compute_start_of_run_fix()`: verified against all 4 sections at a
-  centred along/lateral position (along/lateral estimate within ~1mm of
-  truth against the simulator's ground truth, with default noise/dropout
-  and default pillars; the matching candidate from `candidate_start_positions()`
-  reproduces the true x/y/heading), ~99% success rate (198/200) at that
-  same centred spot across repeated noisy trials, and the along/lateral
-  sweep (noiseless) described above that found how narrow the workable
-  window actually is.
-
-Not tested (couldn't be, in this sandbox): the real `rplidarc1` hardware
-path, and your actual STM32 telemetry integration.
+**Earlier design.** Before September 2026 this repository held a broadside-localization design with a mat-level dashboard (`localization.py`, `scan_prediction.py`). It was replaced by the design above, and is recoverable from git history (commit `dd9c8f4` and earlier).

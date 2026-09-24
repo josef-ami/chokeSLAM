@@ -31,6 +31,27 @@ Server-Sent Events at STREAM_HZ; the init scan and the mock's truth, which
 don't change during a run, come from /api/static once per initialisation.
 
 Everything drawn is in display.py's fixed full-loop frame.
+
+Checkpoint F2 (owner: "keep as many of the tuning values and parameters as
+possible modifiable live from the dashboard; continuously draw the planned path
+my path planner builds after perception"):
+    PLANNED PATH   while a tracker exists, a background thread re-plans every
+                   PLAN_PREVIEW_S what the mission would plan from the tracked
+                   pose and the seats and colours perceived so far
+                   (mission.plan_preview: lap 1 -> the next lane's viewing pose;
+                   laps 2-3 -> the rest of the round and the finish), and the
+                   page draws it with the planner's goals and pass-side lines.
+                   In mission mode, while a run is going, the page draws the
+                   mission's own current path instead (it changes on every re-plan).
+    MISSION MODE   python3 dashboard_server.py --mission   (config.MODE mock: the
+                   simulated car of mission_sim.py, driven by the real run
+                   supervisor + mission; buttons for the start button and for
+                   carrying the car back)   or   python3 run_mission.py --dashboard
+                   (on the robot: the competition program with this page).
+    TUNING         every group of config.py values the Pi reads at use time,
+                   plus the drive firmware's values (servo map, steering lock,
+                   speed loop, encoder scale), which the Pi sends to the STM32
+                   (drive_link.sync_params) -- the panel shows the STM32's echo.
 """
 from __future__ import annotations
 
@@ -45,8 +66,10 @@ from flask import Flask, Response, jsonify, render_template, request
 import config
 import display as dp
 import lane_init as li
+import plan_view as pv_mod
 import seat_occupancy as so
 from lane_tracker import LaneTracker
+from plan_view import _r, plan_view, preview_snapshot
 from scan_processing import clean_and_project, clean_and_project_timed
 
 app = Flask(__name__)
@@ -57,8 +80,54 @@ MAX_LIVE_POINTS = 720
 MAX_PATH_POINTS = 2000
 
 
-def _r(v, nd=1):
-    return None if v is None else round(float(v), nd)
+class PlanPreview:
+    """Re-plans every PLAN_PREVIEW_S. The plan itself runs in a worker process
+    (plan_view.preview_job; why: plan_view's docstring); this thread only takes
+    the snapshot under the runtime's lock and waits for the answer.
+    rt.preview_input() gives a snapshot (or None: nothing to preview),
+    rt.plan_view receives the result."""
+
+    TIMEOUT_S = 20.0
+
+    def __init__(self, rt):
+        self.rt = rt
+        self.runs = 0
+        self._pool = None
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="plan_preview")
+        self._thread.start()
+
+    def _executor(self):
+        if self._pool is None:
+            import multiprocessing as mp
+            from concurrent.futures import ProcessPoolExecutor
+            self._pool = ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn"))
+        return self._pool
+
+    def _loop(self):
+        while True:
+            time.sleep(max(0.05, float(config.PLAN_PREVIEW_S)))
+            try:
+                if not config.PLAN_PREVIEW_ENABLED:
+                    continue
+                with self.rt.lock:
+                    snap = self.rt.preview_input()
+                    tag = self.rt.init_id
+                if snap is None:
+                    continue
+                view = self._executor().submit(pv_mod.preview_job, pv_mod.config_values(), snap).result(
+                    timeout=self.TIMEOUT_S)
+                view["at"] = time.monotonic()
+                with self.rt.lock:
+                    if self.rt.init_id == tag and self.rt.preview_input_ok():
+                        self.rt.plan_view = view
+                self.runs += 1
+            except Exception as e:                      # keep previewing; show it
+                if self._pool is not None and not isinstance(e, ValueError):
+                    self._pool.shutdown(wait=False, cancel_futures=True)   # a broken or stuck worker: start afresh
+                    self._pool = None
+                with self.rt.lock:
+                    self.rt.plan_view = plan_view("preview", False, f"preview error: {type(e).__name__}: {e}",
+                                                  None, None, [])
 
 
 class Runtime:
@@ -82,9 +151,19 @@ class Runtime:
         self.live, self.live_frame = [], "robot"
         self._last_lidar = self._last_view = 0.0
         self.error = None
+        self.plan_view = None
+        self.drive = None                      # real mode: only to keep the STM32's tuning values = config.py
         self._start_sources()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="dashboard_runtime")
         self._thread.start()
+        self.preview = PlanPreview(self)
+
+    # -- planner preview (checkpoint F2) ---------------------------------------
+    def preview_input(self):
+        return None if self.trk is None else preview_snapshot(self.trk)
+
+    def preview_input_ok(self) -> bool:
+        return self.trk is not None
 
     # -- hardware ---------------------------------------------------------------
     def _start_sources(self):
@@ -99,8 +178,10 @@ class Runtime:
         else:
             from lidar_source import RPLidarC1Source
             from stm32_link import Stm32Link
+            from drive_link import DriveLink
             self.link = Stm32Link()
             self.link.start()
+            self.drive = DriveLink(self.link)          # never sends DRIVE frames here: sync_params only
             self.lidar = RPLidarC1Source(config.LIDAR_PORT, config.LIDAR_BAUDRATE, config.LIDAR_SCAN_TIMEOUT_S)
             self.lidar.start()
             if config.CAMERA_ENABLED:
@@ -117,6 +198,7 @@ class Runtime:
                 while self.sim.stats.last_sample is None and time.monotonic() - t0 < 2.0:
                     time.sleep(0.01)
             self.trk, self.init, self.samples = None, None, []
+            self.plan_view = None
             batch = self.link.drain()
             t0 = time.monotonic()
             while not batch and time.monotonic() - t0 < 1.0:
@@ -155,7 +237,7 @@ class Runtime:
                 for p in pts]
 
     def _truth_pillars(self) -> list:
-        if self.mode != "mock":
+        if self.sim is None:
             return []
         t = self.sim.truth()
         g2d = dp.GlobalToDisplay(t["start_section"], t["direction"])
@@ -205,6 +287,8 @@ class Runtime:
                 raw4 = self.lidar.get_latest_scan_timed()
             self._feed_imu()
             self._feed_camera()
+            if self.drive is not None:
+                self.drive.sync_params(now)
             if not raw4:
                 return
             pts, times = clean_and_project_timed(raw4, config.LIDAR_ANGLE_SIGN, config.LIDAR_ANGLE_ZERO_OFFSET_DEG)
@@ -253,7 +337,9 @@ class Runtime:
                 out["path"] = [[round(v, 1) for v in dp.lane_to_display(k % 4, x, y, trk.direction)]
                                for k, x, y in path[::step]] + \
                               [[round(v, 1) for v in dp.lane_to_display(trk.slot, trk.x, trk.y, trk.direction)]]
-            if self.mode == "mock" and self.sim is not None:
+            out["plan"] = self.plan_view
+            out["fw_params"] = self._fw_params()
+            if self.sim is not None:
                 # the true pose at the instant of the tracker's newest sample, so the two compare like for like
                 t = self.sim.truth(None if trk is None else trk.last_sample.t_ms / 1000.0)
                 g2d = dp.GlobalToDisplay(t["start_section"], t["direction"])
@@ -285,6 +371,16 @@ class Runtime:
                 "returns_dropped_old": rec.returns_dropped_old, "max_shift_mm": _r(rec.max_shift_mm),
                 "frames_skipped_old": rec.frames_skipped_old,
                 "outline": {k: [[_r(a), _r(b)] for a, b in v] for k, v in ol.items()}, "seats": seats}
+
+    def _fw_params(self):
+        """The drive firmware's tuning values: config.py's, the STM32's echo, and the ones that differ."""
+        if self.drive is None:
+            return None
+        from drive_link import FW_PARAMS, fw_wanted
+        have = self.drive.fw_params()
+        return {"values": {FW_PARAMS[k][0]: {"config": _r(v, 4), "stm32": _r(have.get(k), 4)}
+                           for k, v in fw_wanted().items()},
+                "mismatch": sorted(self.drive.param_mismatch()), "sent": self.drive.params_sent}
 
     def _init_summary(self):
         r = self.init
@@ -360,11 +456,192 @@ class Runtime:
 
 
 # =============================================================================
+# mission mode (checkpoint F2): the run supervisor + mission behind the same page
+# =============================================================================
+class MissionRuntime(Runtime):
+    """run_control.RunSupervisor on the robot's hardware (run_mission.py
+    --dashboard) or on mission_sim.MissionSim (the mock). The page shows the
+    tracker the supervisor holds (between runs: the one initialised at rest;
+    during a run: the mission's), the mission's current path while it runs and
+    the planner preview between runs. Runs start and stop only from the start
+    button (in the mock: the page's button stands in for it)."""
+
+    def __init__(self, mode: str, link, drive, lidar, camera=None, sim=None, dump=None, clock=None):
+        from collections import deque
+        self.mode = f"mission-{mode}"
+        self.lock = threading.RLock()
+        self.seat_params = so.DetectParams()
+        self.sim, self.link, self.drive, self.lidar, self.camera = sim, link, drive, lidar, camera
+        self.clock = clock or (sim.now if sim is not None else time.monotonic)
+        self.dump = dump
+        self.mock = ({"direction": sim.direction, "start_slot": 0, "seed": sim.seed, "speed_mm_s": 0.0,
+                      "time_scale": 1.0} if sim is not None else None)
+        self.log_lines = deque(maxlen=80)
+        self._last_trk = None
+        self._shown = None
+        self._mission_path = None
+        self.init_id = 0
+        self.static = {"init_id": 0, "init_scan": [], "truth_pillars": self._truth_pillars()}
+        self.live, self.live_frame = [], "robot"
+        self._last_view = 0.0
+        self.error = None
+        self.plan_view = None
+        self.camera_ms, self._last_cam_no = None, None
+        self.samples, self.init_raw, self.first = [], None, None
+        self.message = "Waiting: stand the car still in a start zone; the LED goes solid when a press will start."
+        self._new_supervisor()
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="mission_runtime")
+        self._thread.start()
+        self.preview = PlanPreview(self)
+
+    def _new_supervisor(self):
+        from mission import Mission
+        from run_control import RunSupervisor
+        self.sup = RunSupervisor(self.link, self.drive, self.lidar, self.camera,
+                                 make_mission=lambda trk: Mission(trk, log=None), log=self._log,
+                                 dump=self.dump, seat_params=self.seat_params)
+
+    def _log(self, line):
+        self.log_lines.append((round(self.clock(), 2), line))
+        self.message = line
+        print(line)
+
+    # the tracker and initialisation shown: the supervisor's, else the last run's
+    @property
+    def trk(self):
+        cur = self.sup.tracker()
+        if cur is not None:
+            self._last_trk = cur
+        return self._last_trk
+
+    @property
+    def init(self):
+        return self.sup.init_result()
+
+    def preview_input(self):
+        cur = self.sup.tracker()
+        if cur is None or self.sup.mode != "WAIT":
+            return None
+        return preview_snapshot(cur)
+
+    def preview_input_ok(self) -> bool:
+        return self.sup.mode == "WAIT" and self.sup.tracker() is not None
+
+    def initialise(self) -> dict:
+        return {"ok": False, "reason": "mission mode: the car initialises by itself whenever it stands still; "
+                                      "runs start from the start button"}
+
+    def save_run(self) -> dict:
+        return {"ok": False, "reason": "mission mode: use run_mission.py --log imu.log --dump scan.json"}
+
+    # -- the loop -------------------------------------------------------------------------
+    def _loop(self):
+        while True:
+            tick = time.monotonic()
+            try:
+                with self.lock:
+                    self.sup.step(self.clock())
+                    self._after_step()
+                self.error = None
+            except Exception as e:
+                import traceback
+                self.error = f"{type(e).__name__}: {e}"
+                traceback.print_exc()
+            time.sleep(max(0.0, 1.0 / max(1.0, float(config.DRIVE_HZ)) - (time.monotonic() - tick)))
+
+    def _after_step(self):
+        cur = self.sup.tracker()
+        if cur is not None and cur is not self._shown:           # a new initialisation (at rest)
+            self._shown = cur
+            self._last_trk = cur
+            self.init_id += 1
+            self.plan_view = None
+            pts = []
+            if self.sup.prep_raw is not None:
+                pts = clean_and_project(self.sup.prep_raw, config.LIDAR_ANGLE_SIGN, config.LIDAR_ANGLE_ZERO_OFFSET_DEG)
+            self.static = {"init_id": self.init_id, "init_scan": self._init_scan_display(pts) if pts else [],
+                           "truth_pillars": self._truth_pillars()}
+        mis = self.sup.mis
+        if self.sup.mode == "RUN" and mis is not None and mis.path is not None and mis.path is not self._mission_path:
+            self._mission_path = mis.path
+            plans = [e for e in mis.events if e.kind == "plan"]
+            self.plan_view = plan_view("mission", True, plans[-1].detail if plans else "", mis.path,
+                                       mis.last_world, mis.last_goals)
+        now = time.monotonic()
+        if now - self._last_view >= 1.0 / max(1, config.STREAM_HZ):
+            self._last_view = now
+            raw4 = self.lidar.get_latest_scan_timed()
+            if raw4:
+                pts, times = clean_and_project_timed(raw4, config.LIDAR_ANGLE_SIGN, config.LIDAR_ANGLE_ZERO_OFFSET_DEG)
+                if self.trk is not None and self.sup.tracker() is None:
+                    self.live, self.live_frame = [], "track"          # between runs, before a new rest: no pose
+                else:
+                    self._live_view(pts, times)
+
+    def state(self) -> dict:
+        from drive_link import RUN_STATE_NAMES
+        out = super().state()
+        with self.lock:
+            sup, mis = self.sup, self.sup.mis
+            rs, rid = self.drive.run_state()
+            ev = [] if mis is None else [{"t": _r(e.t, 2), "kind": e.kind, "detail": e.detail} for e in mis.events[-40:]]
+            out["mission"] = {
+                "run_state": RUN_STATE_NAMES.get(rs, "unknown" if rs is None else str(rs)), "run_id": rid,
+                "ready": self.drive.ready, "supervisor": sup.mode,
+                "phase": None if mis is None else mis.phase,
+                "target_lane": None if mis is None else mis.target_lane,
+                "plans": None if mis is None else mis.plans, "replans": None if mis is None else mis.replans,
+                "runs": [list(r) for r in sup.runs], "events": ev,
+                "log": [{"t": t, "line": ln} for t, ln in list(self.log_lines)[-30:]],
+                "mock": self.sim is not None,
+                "layout": self.sim.layout.describe() if self.sim is not None else None,
+            }
+        return out
+
+    # -- the mock's hands -------------------------------------------------------------------
+    def press(self):
+        if self.sim is None:
+            return {"ok": False, "reason": "on the robot, use the start button"}
+        self.sim.press()
+        return {"ok": True}
+
+    def carry_to_start(self):
+        if self.sim is None:
+            return {"ok": False, "reason": "on the robot, carry it yourself"}
+        self.sim.carry_to_start()
+        return {"ok": True}
+
+    def new_layout(self, direction, seed):
+        if self.sim is None:
+            return {"ok": False, "reason": "not in the mock"}
+        from drive_link import DriveLink
+        from mission_sim import MissionSim
+        with self.lock:
+            self.sim.stop()
+            self.sim = MissionSim(direction, seed)
+            self.link, self.lidar, self.camera = self.sim.link, self.sim.lidar, self.sim.camera
+            self.drive = DriveLink(self.link)
+            self.clock = self.sim.now
+            self.mock = {"direction": self.sim.direction, "start_slot": 0, "seed": seed, "speed_mm_s": 0.0,
+                         "time_scale": 1.0}
+            self._last_trk = self._shown = self._mission_path = None
+            self.plan_view = None
+            self.init_id += 1
+            self.static = {"init_id": self.init_id, "init_scan": [], "truth_pillars": self._truth_pillars()}
+            self._new_supervisor()
+            self.message = f"New layout: {self.sim.layout.describe()}"
+        return {"ok": True, "layout": self.sim.layout.describe()}
+
+
+# =============================================================================
 # tuning panel (#43): four groups, every value editable, with its meaning and
 # when it takes effect. Edits live in memory only; "Reset" restores config.py.
 # =============================================================================
 NEXT_INIT = "next Initialise"
 LIVE = "live"
+NEXT_PLAN = "next plan (and the preview)"
+STM32 = "live: sent to the STM32 within 0.5 s"
+NEXT_REST = "next initialisation at rest"
 
 
 def _cfg(name, kind, unit, when, meaning, options=None):
@@ -415,6 +692,8 @@ def registry():
             _cfg("GAP_MARGIN_MM", "float", "mm", NEXT_INIT, "A forward return this far beyond the side-wall "
                  "line counts as 'passed through' the gap."),
             _cfg("GAP_OPEN_MIN_MM", "float", "mm", NEXT_INIT, "The island side needs at least this much opening."),
+            _cfg("INIT_USE_WALL_YAW", "bool", "", NEXT_INIT, "P2: measure y along the lane using the fitted wall "
+                 "yaw (the car need not be placed exactly straight).", options=[True, False]),
             _cfg("GAP_CLOSED_MAX_MM", "float", "mm", NEXT_INIT, "...and the other side at most this much, or the "
                  "direction is UNDETERMINED."),
             _cfg("GAP_MIN_ANGLE_FROM_FWD_DEG", "float", "deg", NEXT_INIT, "Rays closer to dead ahead than this "
@@ -430,7 +709,8 @@ def registry():
                  "(owner, #36). Wrong = every turn goes the wrong way. (In mock mode the simulated chip is built "
                  "with the value in force at Initialise.)", options=[1, -1]),
             _cfg("ENCODER_TICKS_PER_CM", "float", "ticks/cm", NEXT_INIT, "Hall-encoder ticks per cm (owner: "
-                 "14.853). 2% off gives about 50 mm of error over a lap."),
+                 "14.853). 2% off gives about 50 mm of error over a lap. Also sent to the STM32 (its speed loop's "
+                 "speed estimate) within 0.5 s."),
             _cfg("MAX_SPEED_MM_S", "float", "mm/s", LIVE, "An encoder step faster than this is a glitch and is not "
                  "integrated. Must be above the robot's real top speed."),
             _cfg("TURN_MIN_DEG", "float", "deg", LIVE, "A turn needs this much rotation toward the round "
@@ -441,6 +721,12 @@ def registry():
                  "in the new lane."),
             _cfg("RECHECK_ALIGN_DEG", "float", "deg", LIVE, "Re-check frames are used only while the heading is "
                  "within this of the lane's direction."),
+            _cfg("RECHECK_EXTEND", "bool", "", LIVE, "Past RECHECK_Y_MAX_MM, keep re-checking seats still "
+                 "at least RECHECK_AHEAD_MIN_MM ahead (#81).", options=[True, False]),
+            _cfg("RECHECK_AHEAD_MIN_MM", "float", "mm", LIVE, "...a seat must be at least this far ahead to be "
+                 "re-checked in the extension."),
+            _cfg("RECHECK_START_LANE_ON_RETURN", "bool", "", LIVE, "Re-check the start lane once when the car "
+                 "comes back to it after lap 1 (#82).", options=[True, False]),
             _cfg("DESKEW_HISTORY_S", "float", "s", NEXT_INIT, "Pose history kept for the de-skew; LIDAR returns "
                  "older than this are dropped as stale."),
             _cfg("IMU_STALE_S", "float", "s", LIVE, "No STM32 line for this long = link STALE."),
@@ -464,6 +750,103 @@ def registry():
             _seat("min_range_mm", "float", "mm", "Returns nearer than this are ignored by the seat check."),
             _seat("max_range_mm", "float", "mm", "Returns farther than this are ignored by the seat check."),
         ]},
+        {"group": "Steering + drive firmware (STM32)", "params": [
+            _cfg("SERVO_STRAIGHT_DEG", "float", "servo deg", STM32, "Servo angle that puts the wheels straight "
+                 "(OpenRound 76.5). Trim it until the car drives straight with steering 0."),
+            _cfg("SERVO_LEFT_STOP_DEG", "float", "servo deg", STM32, "Servo angle at full LEFT lock (below "
+                 "straight steers left; OpenRound 20)."),
+            _cfg("SERVO_RIGHT_STOP_DEG", "float", "servo deg", STM32, "Servo angle at full RIGHT lock (OpenRound 140)."),
+            _cfg("STEER_LOCK_LEFT_DEG", "float", "deg", STM32 + "; " + NEXT_PLAN, "PLACEHOLDER. Road-wheel "
+                 "(bicycle) angle at the left stop: the planner's tightest left arc and the servo map's scale. "
+                 "From the 27 cm radius read at the outer front wheel; 31.8 if at the outer rear wheel, 26.7 at "
+                 "the rear-axle midpoint. Measure it (RUNNING_ON_THE_ROBOT 6.5)."),
+            _cfg("STEER_LOCK_RIGHT_DEG", "float", "deg", STM32 + "; " + NEXT_PLAN, "PLACEHOLDER. The same to the "
+                 "right (25 cm: 40.5; outer rear wheel 34.3, rear-axle midpoint 28.5)."),
+            _cfg("SPEED_KFF", "float", "PWM per mm/s", STM32, "PLACEHOLDER. Speed feed-forward slope "
+                 "(drive_calibrate.py measures it)."),
+            _cfg("SPEED_OFFSET_PWM", "float", "PWM", STM32, "PLACEHOLDER. PWM the motor needs to start turning."),
+            _cfg("SPEED_KP", "float", "PWM per mm/s", STM32, "PLACEHOLDER. Speed loop proportional gain."),
+            _cfg("SPEED_KI", "float", "PWM per mm", STM32, "PLACEHOLDER. Speed loop integral gain."),
+        ]},
+        {"group": "Planner", "params": [
+            _cfg("PLAN_RADIUS_FACTOR", "float", "x", NEXT_PLAN, "Planned arcs are the lock radius times this "
+                 "(1.25 leaves the follower steering to correct errors). Lower = tighter corners, less margin."),
+            _cfg("PLAN_INFLATION_MM", "float", "mm", NEXT_PLAN, "Obstacles are grown by this for the "
+                 "visibility graph (car half-width 57.2 + clearance)."),
+            _cfg("PLAN_CLEARANCE_MM", "float", "mm", NEXT_PLAN, "The car's real footprint must stay this far from "
+                 "everything along the whole path."),
+            _cfg("PLAN_INFLATION_STEP_MM", "float", "mm", NEXT_PLAN, "An obstacle the footprint check hits is "
+                 "inflated by this much more and the path re-planned."),
+            _cfg("PLAN_MAX_ITER", "int", "", NEXT_PLAN, "...at most this many times."),
+            _cfg("PLAN_MAX_TURN_DEG", "float", "deg", NEXT_PLAN, "No single arc turns more than this."),
+            _cfg("START_LANE_OUTER_SEATS_EMPTY", "bool", "", NEXT_PLAN, "Rulebook Fig. 8e: an UNKNOWN outer seat of "
+                 "the start lane is not treated as a possible pillar.", options=[True, False]),
+            _cfg("PLAN_PREVIEW_ENABLED", "bool", "", LIVE, "Dashboard: re-plan and draw the planner preview.",
+                 options=[True, False]),
+            _cfg("PLAN_PREVIEW_S", "float", "s", LIVE, "Dashboard: how often the preview re-plans."),
+        ]},
+        {"group": "Mission + speeds", "params": [
+            _cfg("SPEED_LAP1_MM_S", "float", "mm/s", NEXT_PLAN, "Cruise speed on lap 1."),
+            _cfg("SPEED_LAPS23_MM_S", "float", "mm/s", NEXT_PLAN, "Cruise speed on laps 2-3."),
+            _cfg("SPEED_MIN_MM_S", "float", "mm/s", LIVE, "The follower never asks for less than this while moving."),
+            _cfg("LAT_ACCEL_MM_S2", "float", "mm/s²", NEXT_PLAN, "Arc speed limit: v <= sqrt(this x radius)."),
+            _cfg("DECEL_MM_S2", "float", "mm/s²", NEXT_PLAN, "Braking into a stop."),
+            _cfg("VIEW_X_MM", "list", "mm", NEXT_PLAN, "Viewing-pose candidates across the new lane (x from the "
+                 "outer wall), first preferred. JSON list, e.g. [500, 350, 650]."),
+            _cfg("VIEW_Y_MM", "float", "mm", NEXT_PLAN, "Viewing pose: how far into the new lane (500 = the corner "
+                 "square's centre)."),
+            _cfg("LOOK_SETTLE_S", "float", "s", LIVE, "At a viewing pose: stand at least this long before planning."),
+            _cfg("LOOK_TIMEOUT_S", "float", "s", LIVE, "...and at most this long waiting for seats and colours."),
+            _cfg("COLOR_LOOK_DIST_MM", "float", "mm", LIVE, "Stop when a pillar of unknown colour is this close ahead."),
+            _cfg("COLOR_LOOK_RETRIES", "int", "", LIVE, "Colour re-requests before the pillar is passed either side."),
+            _cfg("REPLAN_DEVIATION_MM", "float", "mm", LIVE, "Laps 2-3: re-plan when the car is this far off the path."),
+            _cfg("REVERSE_SPEED_MM_S", "float", "mm/s", LIVE, "Backing up when no forward path exists."),
+            _cfg("REVERSE_STEPS_MM", "list", "mm", LIVE, "Back-up distances tried, shortest first. JSON list."),
+            _cfg("REVERSE_MAX_PER_STOP", "int", "", LIVE, "Back-ups allowed per stop."),
+            _cfg("REVERSE_CLEARANCE_MM", "float", "mm", LIVE, "A back-up must stay this far from everything."),
+            _cfg("FINISH_MARGIN_MM", "float", "mm", NEXT_PLAN, "Stop with the whole outline this far inside the "
+                 "start section."),
+        ]},
+        {"group": "Path follower", "params": [
+            _cfg("FOLLOWER_MODE", "str", "", NEXT_PLAN, "rwf = rear-wheel feedback (default), pp = pure pursuit.",
+                 options=["rwf", "pp"]),
+            _cfg("RWF_LENGTH_MM", "float", "mm", LIVE, "rwf: a lateral error dies out over about this distance."),
+            _cfg("RWF_DAMPING", "float", "", LIVE, "rwf: damping of the lateral error."),
+            _cfg("RWF_PREVIEW_S", "float", "s", LIVE, "rwf: curvature is taken this far ahead (servo lag + link latency)."),
+            _cfg("PP_LOOKAHEAD_S", "float", "s", LIVE, "pp: lookahead = speed x this ..."),
+            _cfg("PP_LOOKAHEAD_MIN_MM", "float", "mm", LIVE, "pp: ... at least this ..."),
+            _cfg("PP_LOOKAHEAD_MAX_MM", "float", "mm", LIVE, "pp: ... at most this."),
+            _cfg("DRIVE_HZ", "float", "Hz", LIVE, "DRIVE frames (control periods) per second."),
+        ]},
+        {"group": "Run control (start button)", "params": [
+            _cfg("START_STILL_WINDOW_S", "float", "s", LIVE, "At rest = over this long ..."),
+            _cfg("START_STILL_ENC_TICKS", "int", "ticks", LIVE, "... the encoder moved at most this ..."),
+            _cfg("START_STILL_YAW_DEG", "float", "deg", LIVE, "... and the yaw at most this."),
+            _cfg("START_SCAN_MARGIN_S", "float", "s", NEXT_REST, "Use LIDAR returns measured this long after the "
+                 "rest began."),
+            _cfg("START_MIN_RETURNS", "int", "", NEXT_REST, "Fewer fresh returns: wait for more."),
+            _cfg("START_RETRY_S", "float", "s", LIVE, "A failed initialisation is retried this often at rest."),
+        ]},
+        {"group": "Pillar colour + camera", "params": [
+            _cfg("COLOR_ID_MIN_FRACTION", "float", "", LIVE, "P3: the winning colour's share of the pillar's ROI."),
+            _cfg("COLOR_ID_MARGIN_RATIO", "float", "x", LIVE, "...and at least this many times the other colour's."),
+            _cfg("COLOR_ID_ROI_MARGIN_FACTOR", "float", "x", LIVE, "ROI = the pillar's projected box widened by this."),
+            _cfg("COLOR_ID_WINDOW_S", "float", "s", LIVE, "A colour request stays open this long after the first "
+                 "in-view frame ..."),
+            _cfg("COLOR_ID_MAX_ATTEMPTS", "int", "", LIVE, "... for at most this many in-view frames."),
+            _cfg("COLOR_MIN_SAT", "int", "0-255", LIVE, "HSV: pixels less saturated than this count for no colour."),
+            _cfg("COLOR_MIN_VAL", "int", "0-255", LIVE, "HSV: pixels darker than this count for no colour."),
+            _cfg("COLOR_RED_HUE", "list", "OpenCV hue", LIVE, "Red hue ranges (0-179, wraps). JSON, e.g. "
+                 "[[0, 10], [170, 179]]."),
+            _cfg("COLOR_GREEN_HUE", "list", "OpenCV hue", LIVE, "Green hue ranges. JSON, e.g. [[40, 85]]."),
+            _cfg("CAMERA_BEARING_SIGN", "int", "", LIVE, "Flip if boxes land mirrored (camera_check.py).",
+                 options=[1, -1]),
+            _cfg("CAMERA_ROTATE_180", "bool", "", LIVE, "The image is upside down.", options=[True, False]),
+            _cfg("CAMERA_HEIGHT_MM", "float", "mm", LIVE, "Lens height above the floor."),
+            _cfg("CAMERA_OFFSET_FORWARD_MM", "float", "mm", LIVE, "Lens ahead of the rear axle."),
+            _cfg("CAMERA_OFFSET_LATERAL_MM", "float", "mm", LIVE, "Lens to the left of the centre line."),
+            _cfg("CAMERA_TIME_OFFSET_S", "float", "s", LIVE, "Camera timestamps relative to the STM32 clock."),
+        ]},
     ]
 
 
@@ -475,6 +858,10 @@ RT: Runtime | None = None
 DEFAULTS: dict = {}
 
 
+def _tuple(v):
+    return tuple(_tuple(x) for x in v) if isinstance(v, (list, tuple)) else v
+
+
 def _coerce(p, v):
     if p["kind"] == "int":
         v = int(float(v))
@@ -482,6 +869,26 @@ def _coerce(p, v):
         v = float(v)
         if not math.isfinite(v):
             raise ValueError("not a finite number")
+    elif p["kind"] == "bool":
+        if isinstance(v, str):
+            if v.strip().lower() not in ("true", "false", "1", "0"):
+                raise ValueError("must be true or false")
+            v = v.strip().lower() in ("true", "1")
+        v = bool(v)
+    elif p["kind"] == "list":
+        if isinstance(v, str):
+            v = json.loads(v)
+        if not isinstance(v, (list, tuple)) or not v:
+            raise ValueError("must be a non-empty JSON list")
+        flat = json.dumps(v)
+        if any(c.isalpha() for c in flat.replace("e", "")):
+            raise ValueError("numbers only")
+        old = p["get"]()
+        if isinstance(old, (list, tuple)) and old and isinstance(old[0], (list, tuple)) != isinstance(v[0], (list, tuple)):
+            raise ValueError(f"must have the same shape as {json.dumps(old)}")
+        v = _tuple(v)
+    elif p["kind"] == "str":
+        v = str(v)
     if p["options"] is not None and v not in p["options"]:
         raise ValueError(f"must be one of {p['options']}")
     return v
@@ -555,9 +962,12 @@ def api_tuning():
             v = p["get"]()
             ps.append({"name": p["name"], "value": v, "default": DEFAULTS.get(p["name"]), "unit": p["unit"],
                        "when": p["when"], "meaning": p["meaning"], "kind": p["kind"], "options": p["options"],
+                       "text": json.dumps(v) if p["kind"] == "list" else None,
                        "changed": DEFAULTS.get(p["name"]) != v})
         groups.append({"group": g["group"], "params": ps})
-    return jsonify({"groups": groups})
+    with RT.lock:
+        fw = RT._fw_params()
+    return jsonify({"groups": groups, "fw": fw})
 
 
 @app.route("/api/param", methods=["POST"])
@@ -570,7 +980,7 @@ def api_param():
         v = _coerce(p, body.get("value"))
         with RT.lock:
             p["set"](v)
-    except (TypeError, ValueError) as e:
+    except (TypeError, ValueError, json.JSONDecodeError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400
     return jsonify({"ok": True, "name": p["name"], "value": p["get"](), "when": p["when"]})
 
@@ -591,19 +1001,78 @@ def api_save_run():
     return jsonify(RT.save_run())
 
 
+@app.route("/api/mission/<action>", methods=["POST"])
+def api_mission(action):
+    if not isinstance(RT, MissionRuntime):
+        return jsonify({"ok": False, "reason": "not in mission mode"}), 400
+    if action == "press":
+        return jsonify(RT.press())
+    if action == "carry":
+        return jsonify(RT.carry_to_start())
+    if action == "layout":
+        body = request.get_json(force=True, silent=True) or {}
+        d = body.get("direction")
+        if d not in (None, "CCW", "CW"):
+            return jsonify({"ok": False, "reason": "direction must be CCW or CW"}), 400
+        try:
+            seed = int(body.get("seed", 1))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "reason": "seed must be an integer"}), 400
+        return jsonify(RT.new_layout(d, seed))
+    return jsonify({"ok": False, "reason": f"unknown action {action!r}"}), 400
+
+
+def _capture_defaults():
+    global DEFAULTS
+    DEFAULTS = {name: p["get"]() for name, p in _flat().items()}
+
+
 def create_runtime(mode: str | None = None) -> Runtime:
     """Start the runtime (hardware or simulation) and capture the tuning
     defaults. Used by main() and by the tests."""
-    global RT, DEFAULTS
+    global RT
     RT = Runtime(mode or config.MODE)
-    DEFAULTS = {name: p["get"]() for name, p in _flat().items()}
+    _capture_defaults()
     return RT
 
 
-def main():
-    create_runtime()
-    print(f"[dashboard] {config.MODE} mode on http://{config.DASHBOARD_HOST}:{config.DASHBOARD_PORT}/")
+def create_mission_runtime(mode: str | None = None, link=None, drive=None, lidar=None, camera=None,
+                           dump=None, seed: int = 1, direction: str | None = None) -> MissionRuntime:
+    """Mission mode. mock: a fresh mission_sim.MissionSim. real: the hardware the
+    caller opened (run_mission.py --dashboard)."""
+    global RT
+    mode = mode or config.MODE
+    if mode == "mock":
+        from drive_link import DriveLink
+        from mission_sim import MissionSim
+        sim = MissionSim(direction, seed)
+        RT = MissionRuntime("mock", sim.link, DriveLink(sim.link), sim.lidar, sim.camera, sim=sim)
+    else:
+        RT = MissionRuntime("real", link, drive, lidar, camera, dump=dump)
+    _capture_defaults()
+    return RT
+
+
+def serve():
+    print(f"[dashboard] {RT.mode} on http://{config.DASHBOARD_HOST}:{config.DASHBOARD_PORT}/")
     app.run(host=config.DASHBOARD_HOST, port=config.DASHBOARD_PORT, threaded=True, debug=False)
+
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mission", action="store_true",
+                    help="the run supervisor + mission (mock: the simulated car; real: use run_mission.py --dashboard)")
+    ap.add_argument("--seed", type=int, default=1, help="mission mock: the rulebook layout")
+    ap.add_argument("--direction", choices=["CCW", "CW"], help="mission mock: force the direction")
+    a = ap.parse_args()
+    if a.mission:
+        if config.MODE != "mock":
+            raise SystemExit("on the robot, mission mode is: python3 run_mission.py --dashboard")
+        create_mission_runtime("mock", seed=a.seed, direction=a.direction)
+    else:
+        create_runtime()
+    serve()
 
 
 if __name__ == "__main__":

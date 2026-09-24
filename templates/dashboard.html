@@ -10,14 +10,17 @@
     --wall: #c9d2e3; --lane: #1a2536; --lane-cur: #1f2d44;
     --present: #f0a33a; --absent: #3fbf7f; --unknown: #7d879a; --pillar-red: #e5484d; --pillar-green: #22c55e;
     --path: #43c6db; --live: #f4f06a; --init: #b48cff; --truth: #ff6b8a; --robot: #ffffff;
-    --bad: #ff6b6b; --ok: #3fbf7f; --warn: #f0a33a;
+    --bad: #ff6b6b; --ok: #3fbf7f; --warn: #f0a33a; --plan: #ff4fd8; --goal: #ffd166;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
   header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; }
   .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; letter-spacing: .04em; }
-  .badge.real { background: #26406b; } .badge.mock { background: #5b3a6b; }
+  .badge.real, .badge.mission-real { background: #26406b; } .badge.mock, .badge.mission-mock { background: #5b3a6b; }
+  #planInfo { margin-top: 6px; font-size: 12px; color: var(--muted); }
+  #planInfo b { color: var(--plan); }
+  .fw { font-size: 11px; color: var(--muted); } .fw.mis { color: var(--bad); }
   #message { color: var(--muted); flex: 1; min-width: 200px; }
   #error { color: var(--bad); }
   main { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
@@ -74,6 +77,7 @@
       <canvas id="loop" width="900" height="900"></canvas>
       <div id="tip"></div>
     </div>
+    <div id="planInfo">planned path: –</div>
     <div id="legend">
       <span><span class="sw" style="background:var(--present)"></span> present (colour pending / unknown)</span>
       <span><span class="sw" style="background:var(--pillar-red)"></span> red pillar</span>
@@ -84,6 +88,9 @@
       <label><input type="checkbox" id="showLive" checked> <span class="sw" style="background:var(--live)"></span> live scan</label>
       <label><input type="checkbox" id="showInit" checked> <span class="sw" style="background:var(--init)"></span> init scan</label>
       <label><input type="checkbox" id="showPath" checked> <span class="sw" style="background:var(--path)"></span> IMU path</label>
+      <label><input type="checkbox" id="showPlan" checked> <span class="sw" style="background:var(--plan)"></span> planned path</label>
+      <label><input type="checkbox" id="showWorld" checked> <span class="sw" style="border:2px dashed var(--goal)"></span> planner goals + pass-side lines</label>
+      <label><input type="checkbox" id="showFwd"> <span class="sw" style="border:1px dotted var(--muted)"></span> forward-only lines</label>
       <label id="truthToggle" style="display:none"><input type="checkbox" id="showTruth" checked> <span class="sw" style="background:var(--truth)"></span> truth (mock)</label>
     </div>
   </section>
@@ -94,7 +101,7 @@
       <div class="row">
         <button id="initBtn">Initialise</button>
         <button id="saveBtn" class="secondary">Save run</button>
-        <span class="muted small">Initialise with the robot standing still at its start. Pressing it again starts over from lane 1.</span>
+        <span id="ctlHint" class="muted small">Initialise with the robot standing still at its start. Pressing it again starts over from lane 1.</span>
       </div>
       <div id="mockCtl" class="row" style="display:none; margin-top:10px">
         <span class="muted">Mock:</span>
@@ -108,6 +115,18 @@
       <div id="saveResult" class="small" style="margin-top:8px"></div>
     </div>
 
+    <div class="card" id="missionCard" style="display:none">
+      <h2>Mission</h2>
+      <div id="missionMock" class="row" style="display:none; margin-bottom:8px">
+        <button id="pressBtn">Press start button</button>
+        <button id="carryBtn" class="secondary">Carry back to start</button>
+        <label>direction <select id="lDir"><option value="">random</option><option>CCW</option><option>CW</option></select></label>
+        <label>seed <input id="lSeed" type="number" value="1"></label>
+        <button id="layoutBtn" class="secondary">New layout</button>
+      </div>
+      <div id="mission" class="kv"></div>
+      <div id="missionEvents" style="max-height:200px; overflow:auto; margin-top:8px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px"></div>
+    </div>
     <div class="card"><h2>Tracker</h2><div id="tracker" class="kv"></div></div>
     <div class="card"><h2>Lanes</h2><div id="lanes"></div></div>
     <div class="card"><h2>Initialisation</h2><div id="init" class="muted">not initialised</div></div>
@@ -117,7 +136,7 @@
     <div class="card"><h2>Events</h2><div id="events"></div></div>
     <div class="card">
       <h2>Tuning <button id="resetBtn" class="secondary">Reset to config.py</button></h2>
-      <div class="muted small">Edits apply in memory only (copy a value into config.py to keep it). Each value says when it takes effect.</div>
+      <div class="muted small">Edits apply in memory only (copy a value into config.py to keep it). Each value says when it takes effect. The drive-firmware values are sent to the STM32; its echo is shown next to them (red = it does not hold the value yet).</div>
       <div id="tuning"></div>
     </div>
   </section>
@@ -187,6 +206,34 @@ function draw() {
     ctx.strokeStyle = css('--path'); ctx.lineWidth = 1.5; ctx.beginPath();
     S.path.forEach(([X, Y], i) => { const [a, b] = px(X, Y); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); }); ctx.stroke();
   }
+  // the planned path (checkpoint F2): the planner's goals, pass-side lines and path
+  const P = S.plan;
+  if (P) {
+    if ($('showWorld').checked || $('showFwd').checked) {
+      for (const g of P.gates) {
+        const fwd = g.kind !== 'gate';
+        if (fwd ? !$('showFwd').checked : !$('showWorld').checked) continue;
+        const [a, b] = px(g.a[0], g.a[1]), [c, d] = px(g.b[0], g.b[1]);
+        ctx.strokeStyle = fwd ? css('--muted') : css(g.color === 'red' ? '--pillar-red' : g.color === 'green' ? '--pillar-green' : '--present');
+        ctx.lineWidth = fwd ? 1 : 2; ctx.setLineDash(fwd ? [2, 4] : [6, 4]);
+        ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c, d); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+    if ($('showWorld').checked) {
+      for (const [X, Y, brg] of P.goals) {
+        const [a, b] = px(X, Y), t = brg * Math.PI / 180;
+        ctx.strokeStyle = css('--goal'); ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(a, b, 6, 0, 2 * Math.PI); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(a + 12 * Math.sin(t), b - 12 * Math.cos(t)); ctx.stroke();
+      }
+    }
+    if ($('showPlan').checked && P.path.length > 1) {
+      ctx.strokeStyle = css('--plan'); ctx.lineWidth = 3; ctx.globalAlpha = P.ok ? 0.9 : 0.4;
+      ctx.beginPath(); P.path.forEach(([X, Y], i) => { const [a, b] = px(X, Y); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); });
+      ctx.stroke(); ctx.globalAlpha = 1;
+    }
+  }
   // seats
   const s = 25 * sc() + 3;
   for (const lane of (S.lanes || [])) {
@@ -244,7 +291,7 @@ cv.addEventListener('mousemove', e => {
   tip.style.left = (e.clientX - r.left + 16) + 'px'; tip.style.top = (e.clientY - r.top + 16) + 'px';
 });
 cv.addEventListener('mouseleave', () => $('tip').style.display = 'none');
-for (const id of ['showLive', 'showInit', 'showPath', 'showTruth']) $(id).addEventListener('change', draw);
+for (const id of ['showLive', 'showInit', 'showPath', 'showTruth', 'showPlan', 'showWorld', 'showFwd']) $(id).addEventListener('change', draw);
 
 // ---- panel ------------------------------------------------------------------
 const kv = (el, rows) => { el.innerHTML = rows.map(([k, v]) => `<div>${esc(k)}</div><div>${v}</div>`).join(''); };
@@ -256,9 +303,32 @@ const stateLabel = st => `<span class="st-${st}">${st === 'occupied' ? 'PRESENT'
 function renderPanel() {
   $('modeBadge').textContent = S.mode.toUpperCase(); $('modeBadge').className = 'badge ' + S.mode;
   $('message').textContent = S.message; $('error').textContent = S.error ? 'loop error: ' + S.error : '';
+  const mission = S.mode.startsWith('mission');
   $('initBtn').textContent = S.tracking ? 'Re-initialise' : 'Initialise';
+  $('initBtn').style.display = mission ? 'none' : ''; $('saveBtn').style.display = mission ? 'none' : '';
+  $('ctlHint').textContent = mission ? 'Mission mode: the car initialises itself whenever it has stood still for a second; runs start and stop only from the start button (the mock\'s button stands in for it).' :
+    'Initialise with the robot standing still at its start. Pressing it again starts over from lane 1.';
   $('mockCtl').style.display = S.mode === 'mock' ? 'flex' : 'none';
-  $('truthToggle').style.display = S.mode === 'mock' ? 'inline-flex' : 'none';
+  $('truthToggle').style.display = S.truth ? 'inline-flex' : 'none';
+  const P = S.plan;
+  $('planInfo').innerHTML = P ? `<b>planned path</b> (${P.source === 'mission' ? "the mission's current path" : 'planner preview from the tracked pose'}): ` +
+    `<span class="${P.ok ? '' : 'bad'}">${esc(P.what)}</span>` + (P.ms !== null ? ` · planned in ${P.ms} ms` : '') +
+    ` · ${P.gates.filter(g => g.kind === 'gate').length} pass-side line(s), ${P.goals.length} goal(s)` : 'planned path: – (appears once the car is initialised)';
+  const M = S.mission;
+  $('missionCard').style.display = M ? '' : 'none';
+  if (M) {
+    $('missionMock').style.display = M.mock ? 'flex' : 'none';
+    const rsCls = M.run_state === 'RUNNING' ? 'ok' : M.run_state === 'STOPPED' ? 'warn' : '';
+    kv($('mission'), [
+      ['run (STM32)', `<span class="${rsCls}"><b>${esc(M.run_state)}</b></span> · run ${fmt(M.run_id)}`],
+      ['Pi', M.ready ? '<span class="ok">READY: a press starts a run</span>' : esc(M.supervisor === 'RUN' ? 'running the mission' : M.supervisor === 'ENDING' ? 'ending the run' : 'not ready (initialising, or the car is moving)')],
+      ['mission phase', M.phase ? `${esc(M.phase)} · target lane ${fmt(M.target_lane)} · ${fmt(M.plans)} plans, ${fmt(M.replans)} re-plans` : '–'],
+      ['runs', M.runs.length ? M.runs.map(r => `${r[0]}: ${esc(r[1])}`).join(', ') : '–'],
+      ...(M.layout ? [['layout (mock)', `<span class="small">${esc(M.layout)}</span>`]] : []),
+    ]);
+    $('missionEvents').innerHTML = M.events.slice().reverse().map(e => `<div><span class="muted">${e.t.toFixed(2)} s</span> <b>${esc(e.kind)}</b> ${esc(e.detail)}</div>`).join('') +
+      '<div class="muted" style="margin-top:6px">run control:</div>' + M.log.slice().reverse().map(l => `<div class="muted">${l.t.toFixed(1)} s ${esc(l.line)}</div>`).join('');
+  }
 
   const t = S.tracker;
   kv($('tracker'), t ? [
@@ -304,6 +374,9 @@ function renderPanel() {
     ['rate', fmt(m.rate_hz, ' Hz')], ['last line', fmt(m.last_age_s, ' s ago')],
     ['lines ok / bad', `${fmt(m.lines_ok)} / ${fmt(m.lines_bad)}`], ['lost (seq gaps)', fmt(m.seq_gaps)], ['STM32 restarts', fmt(m.seq_resets)],
     ['firmware log lines', fmt(m.lines_log)],
+    ...(m.sta ? [['STM32 status', `run ${['READY', 'RUNNING', 'STOPPED', 'FINISHED'][m.sta.run_state] ?? '–'} ${fmt(m.sta.run_id)} · ` +
+      ['ENABLED', 'WATCHDOG', 'BUTTON', 'CLOSED_LOOP', 'IMU_OK'].filter((_, i) => m.sta.status & (1 << i)).join(' ') +
+      ` · pwm ${fmt(m.sta.pwm)} · ${fmt(m.sta.speed_mm_s, ' mm/s')}`]] : []),
     ['raw yaw / enc', m.last ? `${m.last.yaw_deg}° / ${m.last.enc}` : '–'],
     ['heading / distance', m.heading_deg !== undefined ? `${m.heading_deg}° / ${(m.distance_mm / 1000).toFixed(2)} m` : '–'],
     ...((m.recent_log || []).length ? [['firmware log', `<span class="muted small">${m.recent_log.slice(-5).map(esc).join('<br>')}</span>`]] : []),
@@ -350,6 +423,12 @@ $('initBtn').addEventListener('click', async () => {
   try { const r = await post('/api/initialise'); if (!r.ok) $('message').textContent = r.reason; }
   finally { $('initBtn').disabled = false; }
 });
+$('pressBtn').addEventListener('click', () => post('/api/mission/press'));
+$('carryBtn').addEventListener('click', () => post('/api/mission/carry'));
+$('layoutBtn').addEventListener('click', async () => {
+  const r = await post('/api/mission/layout', { direction: $('lDir').value || null, seed: +$('lSeed').value });
+  if (!r.ok) $('message').textContent = r.reason;
+});
 $('saveBtn').addEventListener('click', async () => {
   const r = await post('/api/save-run');
   $('saveResult').innerHTML = r.ok ? `Saved ${r.samples} STM32 samples + the start scan to <code>${esc(r.dir)}</code>. Replay: <code>${esc(r.replay)}</code>` : `<span class="bad">${esc(r.reason)}</span>`;
@@ -358,12 +437,15 @@ $('saveBtn').addEventListener('click', async () => {
 // ---- tuning -------------------------------------------------------------------------
 async function loadTuning() {
   const T = await (await fetch('/api/tuning')).json();
+  const FW = T.fw ? T.fw.values : {};
+  const fwNote = n => !FW[n] ? '' : (FW[n].stm32 === null ? ' <span class="fw mis">STM32: no echo yet</span>' :
+    ` <span class="fw ${Math.abs(FW[n].stm32 - FW[n].config) > 1e-3 * Math.max(1, Math.abs(FW[n].config)) ? 'mis' : ''}">STM32: ${FW[n].stm32}</span>`);
   $('tuning').innerHTML = T.groups.map((g, gi) => `<details ${gi === 0 ? '' : ''}><summary>${esc(g.group)} <span class="muted small">(${g.params.length})</span></summary>` +
     g.params.map(p => {
-      const input = p.options ? `<select data-name="${p.name}">${p.options.map(o => `<option ${o === p.value ? 'selected' : ''}>${o}</option>`).join('')}</select>`
-                              : `<input data-name="${p.name}" value="${esc(p.value)}" size="8">`;
+      const input = p.options ? `<select data-name="${p.name}">${p.options.map(o => `<option value="${esc(o)}" ${o === p.value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`
+                              : `<input data-name="${p.name}" value="${esc(p.text !== null ? p.text : p.value)}" size="${p.kind === 'list' ? 18 : 8}">`;
       return `<div class="param"><div><span class="name ${p.changed ? 'changed' : ''}">${esc(p.name)}</span>` +
-        `<span class="tag">${esc(p.when)}</span>${p.changed ? ` <span class="changed small">(config.py: ${esc(p.default)})</span>` : ''}</div>` +
+        `<span class="tag">${esc(p.when)}</span>${p.changed ? ` <span class="changed small">(config.py: ${esc(JSON.stringify(p.default))})</span>` : ''}${fwNote(p.name)}</div>` +
         `<div>${input} <span class="muted small">${esc(p.unit)}</span></div><div class="meaning">${esc(p.meaning)}</div><div class="err" data-err="${p.name}"></div></div>`;
     }).join('') + '</details>').join('');
   const open = JSON.parse(sessionStorage.getItem('openGroups') || '[]');
@@ -391,6 +473,8 @@ function connect() {
   es.onerror = () => { $('message').textContent = 'connection lost, retrying…'; };
 }
 loadTuning(); connect(); draw();
+// refresh the panel (the STM32's echo) unless an input is being edited
+setInterval(() => { if (!$('tuning').contains(document.activeElement)) loadTuning(); }, 3000);
 </script>
 </body>
 </html>
