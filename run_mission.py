@@ -1,7 +1,7 @@
 """
 The obstacle round on the robot (checkpoint E; run control checkpoint F).
 
-    python3 run_mission.py [--log imu.log] [--dump scan.json] [--no-camera]
+    python3 run_mission.py [--log imu.log] [--dump scan.json] [--no-camera] [--dashboard]
 
 Sequence (rules 9.6-9.14):
     1. Power on: the STM32 link opens (the drive firmware streams $IMU + $STA and
@@ -20,6 +20,10 @@ Sequence (rules 9.6-9.14):
        a start zone and press again to restart; each run starts from nothing.
     5. Ctrl-C or an exception: STOP frames, and the program exits.
 --dump writes each run's start scan to <stem>_run<id><ext>.
+--dashboard (checkpoint F2, practice only: no wireless during rounds, 11.10)
+serves the dashboard (http://<pi>:5056/) from this program: the lanes, seats,
+the mission's current planned path (between runs: the planner preview) and the
+live tuning panel. The loop then runs in the dashboard's mission runtime.
 """
 from __future__ import annotations
 
@@ -42,6 +46,7 @@ def main():
     ap.add_argument("--log")
     ap.add_argument("--dump")
     ap.add_argument("--no-camera", action="store_true")
+    ap.add_argument("--dashboard", action="store_true")
     a = ap.parse_args()
     from lidar_source import RPLidarC1Source
     link = _open_link(a)
@@ -63,17 +68,22 @@ def main():
             from camera_source import Picamera2Source
             camera = Picamera2Source()
             camera.start()
+        if a.dashboard:
+            import dashboard_server as ds
+            ds.create_mission_runtime("real", link=link, drive=drive, lidar=lidar, camera=camera, dump=dump)
+            print("waiting: stand the car still in a start zone; LED solid = press the button to start")
+            ds.serve()                                   # returns on Ctrl-C
+            return 0
         sup = RunSupervisor(link, drive, lidar, camera, make_mission=lambda trk: Mission(trk, log=print),
                             log=print, dump=dump)
         print("waiting: stand the car still in a start zone; LED solid = press the button to start")
-        period = 1.0 / config.DRIVE_HZ
         while True:
             tick = time.monotonic()
             sup.step(tick)
             if not link.is_alive():
                 print(f"STM32 link lost: {link.status()['error']}")
                 return 1
-            time.sleep(max(0.0, period - (time.monotonic() - tick)))
+            time.sleep(max(0.0, 1.0 / config.DRIVE_HZ - (time.monotonic() - tick)))
     except KeyboardInterrupt:
         print("\nstopped by Ctrl-C")
         return 1

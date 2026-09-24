@@ -77,8 +77,9 @@ class Stillness:
 
 
 class RunSupervisor:
-    def __init__(self, link, drive, lidar, camera=None, make_mission=None, log=print, dump=None):
+    def __init__(self, link, drive, lidar, camera=None, make_mission=None, log=print, dump=None, seat_params=None):
         self.link, self.drive, self.lidar, self.camera = link, drive, lidar, camera
+        self.seat_params = seat_params    # seat_occupancy.DetectParams (the dashboard edits it live), or None
         self.make_mission = make_mission
         self.log = log
         self.dump = dump                  # callable(run_id, raw, init) or None
@@ -94,10 +95,13 @@ class RunSupervisor:
         self.t_start = 0.0
         self.last_cam = None
         self.runs = []                    # (run_id, outcome) for the record
+        self.last_init = None             # the initialisation of the current / last run
 
     # -- one control period ------------------------------------------------
     def step(self, now=None):
         now = time.monotonic() if now is None else now
+        if hasattr(self.drive, "sync_params"):
+            self.drive.sync_params(now)           # the STM32's tuning values = config.py (checkpoint F2)
         state, rid = self.drive.run_state()
         if state is not None and not self.seen_state:
             self.seen_state = True
@@ -111,6 +115,17 @@ class RunSupervisor:
             self._run(now, state, rid)
         else:
             self._ending(state)
+
+    def tracker(self):
+        """The tracker to show: the running mission's, else the one held for the next press."""
+        if self.trk is not None:
+            return self.trk
+        return None if self.prep is None else self.prep[1]
+
+    def init_result(self):
+        if self.prep is not None:
+            return self.prep[0]
+        return self.last_init
 
     # -- WAIT: keep a valid initialisation for the next press ---------------
     def _wait(self, now, state, rid):
@@ -143,13 +158,14 @@ class RunSupervisor:
             return
         raw = [(a, d, q) for a, d, q, _ in raw4]
         first = self.still.buf[-1]
-        init = li.initialise(clean_and_project(raw, config.LIDAR_ANGLE_SIGN, config.LIDAR_ANGLE_ZERO_OFFSET_DEG))
+        init = li.initialise(clean_and_project(raw, config.LIDAR_ANGLE_SIGN, config.LIDAR_ANGLE_ZERO_OFFSET_DEG),
+                             params=self.seat_params)
         if not init.ok:
             if self.prep is not None or self.moved:
                 self.log(f"[run] initialisation failed ({init.reason}): place the car again")
             self.prep, self.moved = None, False
             return
-        self.prep = (init, LaneTracker(init, first))
+        self.prep = (init, LaneTracker(init, first, params=self.seat_params))
         self.prep_raw = raw
         self.moved = False
         self.log(f"[run] ready: {init.direction.direction} x {init.x.x_mm:.0f} y {init.y.y_mm:.0f} mm "
@@ -158,6 +174,7 @@ class RunSupervisor:
     # -- RUN ---------------------------------------------------------------
     def _start(self, now, rid):
         init, self.trk = self.prep
+        self.last_init = init
         self.drive.ready = False
         if self.dump is not None:
             self.dump(rid, self.prep_raw, init)

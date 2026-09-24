@@ -7,8 +7,11 @@
 //   STM32 -> Pi   $IMU,<seq>,<t_ms>,<enc>,<yaw>\n     100 Hz  (section 9.1)
 //                 $STA,<seq_ack>,<status>,<run_state>,<run_id>,<pwm>,<speed>\n  20 Hz
 //                 # log lines on run-state changes only (OpenRound style)
+//                 $PAR,<id>,<value>\n  echo of a tuning value (PARAM frame)
 //   Pi -> STM32   11-byte DRIVE frames (the owner's stm_link.py spec + the
 //                 PI_READY / RUN_OVER flag bits, drive_protocol.h), 50 Hz
+//                 8-byte PARAM frames: servo map, steering lock, speed loop,
+//                 encoder scale, settable live (the Pi keeps them equal to config.py)
 //
 // BUTTON (PB12), the owner's rule:
 //   ready, stopped or finished -> press: a run STARTS (only while the Pi says
@@ -64,7 +67,7 @@ const int STATUS_LED_PIN = PC13;
 
 const int   SERVO_MIN_PULSE_US = 500;
 const int   SERVO_MAX_PULSE_US = 2500;
-const float TICKS_PER_MM       = 1.4853f;      // config.ENCODER_TICKS_PER_CM / 10
+float       ticksPerMm         = 1.4853f;      // config.ENCODER_TICKS_PER_CM / 10 (PARAM id 10)
 
 const uint32_t PERIOD_MS     = 10;             // $IMU 100 Hz, control 100 Hz
 const uint32_t STA_PERIOD_MS = 50;             // $STA 20 Hz
@@ -82,6 +85,7 @@ drive::SpeedPI        speedPI;
 drive::SpeedEstimator speedEst;
 drive::Button         button;
 drive::Run            run;
+drive::Tunables       tunables{&steerMap, &speedPI, &ticksPerMm};
 bool     haveCmd = false;
 uint32_t lastCmdMs = 0;
 
@@ -165,12 +169,26 @@ void setServo(float deg) {
 
 bool piReady() { return haveCmd && millis() - lastCmdMs <= drive::WATCHDOG_MS && cmd.piReady && imuHealthy(); }
 
+void echoParam(uint8_t id) {
+  float v;
+  char line[40];
+  if (tunables.get(id, v)) sendLine(line, drive::formatParam(line, sizeof(line), id, v));
+}
+
 void readPi() {
   while (Serial.available() > 0) {
     drive::Command c;
-    if (parser.feed((uint8_t)Serial.read(), c)) {
-      cmd = c; haveCmd = true; lastCmdMs = millis();
-      if (run.frame(c) == drive::EV_FINISH) logLine("FINISHED (Pi)");
+    drive::ParamMsg pm;
+    switch (parser.feed((uint8_t)Serial.read(), c, pm)) {
+      case drive::Parser::DRIVE:
+        cmd = c; haveCmd = true; lastCmdMs = millis();
+        if (run.frame(c) == drive::EV_FINISH) logLine("FINISHED (Pi)");
+        break;
+      case drive::Parser::PARAM:
+        if (pm.id == drive::P_REPORT_ALL) { for (uint8_t id = 1; id < drive::P_COUNT; id++) echoParam(id); }
+        else if (tunables.set(pm.id, pm.value)) echoParam(pm.id);
+        break;
+      default: break;
     }
   }
 }
@@ -186,7 +204,7 @@ void updateButton() {
 }
 
 void control(float dt) {
-  speedMeas = speedEst.update(readEncoder(), TICKS_PER_MM, dt);
+  speedMeas = speedEst.update(readEncoder(), ticksPerMm, dt);
   drive::Output o = drive::decide(cmd, haveCmd, millis() - lastCmdMs, run.state == drive::RUNNING);
   if (o.motorOn) {
     setServo(steerMap.servoFor(o.wheelDeg));

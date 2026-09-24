@@ -33,21 +33,16 @@ import shutil
 import subprocess
 import tempfile
 
-import numpy as np
-
 import camera_sim
 import config
-import field_map as fm
 import lane_frame as lf
 import lane_init as li
 import layouts
-import seat_occupancy as so
-import simulation as sim
 from drive_link import DriveLink, RUN_FINISHED, RUN_READY, RUN_RUNNING, RUN_STOPPED
 from mission import Mission
+from mission_sim import World
 from run_control import RunSupervisor
 from scan_processing import clean_and_project
-from stm32_link import ImuSample, parse_line
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FW = os.path.join(HERE, "firmware", "drive_bridge")
@@ -135,68 +130,6 @@ class FakeLink:
             sta = {"seq_ack": s[0], "status": s[1], "age_s": 0.0, "run_state": s[2], "run_id": s[3],
                    "pwm": s[4], "speed_mm_s": s[5]}
         return {"stale": False, "sta": sta}
-
-
-class World:
-    """A rulebook layout, the car's true pose, and the simulated sensors."""
-    def __init__(self, layout, seed):
-        self.lay, self.rng = layout, random.Random(seed)
-        d = layout.direction
-        self.pillars, self.barriers = [], []
-        for k in range(4):
-            sec = layout.slot_section(k)
-            for i, col in layout.pillars.get(sec, []):
-                s = so.seats()[i]
-                self.pillars.append(sim.Pillar(*lf.lane_to_global(sec, d, s.x_mm, s.y_mm), col))
-        for (x0, y0, x1, y1) in fm.parking_barriers(d):
-            a = lf.lane_to_global(layout.start_section, d, x0, y0)
-            b = lf.lane_to_global(layout.start_section, d, x1, y1)
-            self.barriers.append((min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1])))
-        self.place_at_start()
-        self.dist, self.v, self.delta = 0.0, 0.0, 0.0
-        self.stm = sim.SimStm32(self.rng, ticks_per_cm=config.ENCODER_TICKS_PER_CM, yaw_noise_deg=0.0,
-                                yaw_drift_deg_s=0.0)
-        self.cam_rng = np.random.default_rng(seed)
-        self.path = []
-
-    def place_at_start(self):
-        d, sec = self.lay.direction, self.lay.start_section
-        self.gx, self.gy = lf.lane_to_global(sec, d, self.lay.start_x, self.lay.start_y)
-        self.brg = lf.yaw_to_heading(0.0, sec, d)
-
-    def sensor(self):
-        r = math.radians(self.brg)
-        F, L = config.LIDAR_OFFSET_FORWARD_MM, config.LIDAR_OFFSET_LATERAL_MM
-        return self.gx + F * math.sin(r) - L * math.cos(r), self.gy + F * math.cos(r) + L * math.sin(r)
-
-    def drive(self, steer, speed, dt):
-        self.v += (speed - self.v) * min(1.0, dt / 0.10)
-        self.delta += (steer - self.delta) * min(1.0, dt / 0.05)
-        if speed == 0.0 and abs(self.v) < 5.0:
-            self.v = 0.0
-        ds = self.v * dt
-        dth = ds * math.tan(math.radians(self.delta)) / config.WHEELBASE_MM
-        bm = math.radians(self.brg - math.degrees(dth) / 2)
-        self.gx += ds * math.sin(bm)
-        self.gy += ds * math.cos(bm)
-        self.brg = (self.brg - math.degrees(dth)) % 360.0
-        self.dist += ds
-        self.path.append((self.gx, self.gy, self.brg))
-
-    def imu(self, t):
-        smp, _ = parse_line(self.stm.line(int(round(t * 1000)), self.dist, self.brg))
-        return ImuSample(smp.seq, smp.t_ms, smp.enc, smp.yaw_deg, t)
-
-    def scan_timed(self, t):
-        lx, ly = self.sensor()
-        raw = sim.simulate_scan(lx, ly, self.brg, self.pillars, self.barriers, n_points=720, rng_noise=self.rng,
-                                blind_center_deg=config.REAR_BLIND_ARC_CENTER_DEG,
-                                blind_width_deg=config.REAR_BLIND_ARC_WIDTH_DEG)
-        # stamped like sim_closed_loop: the LIDAR's clock offset the tracker corrects for
-        return [(sim.to_sensor_raw(a), dd, q, t + config.LIDAR_TIME_OFFSET_S) for a, dd, q in raw]
-
-    def lane_pose(self):
-        return lf.global_to_lane(self.lay.start_section, self.lay.direction, self.gx, self.gy)
 
 
 class FakeLidar:

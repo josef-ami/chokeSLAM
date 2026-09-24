@@ -216,17 +216,18 @@ OUTLINE_FRONT_MM = 197.3
 OUTLINE_REAR_MM = 86.2               # wing trailing edge
 OUTLINE_HALF_WIDTH_MM = 87.0         # wing span 174 mm
 OUTLINE_LENGTH_MM = OUTLINE_FRONT_MM + OUTLINE_REAR_MM   # 283.5 -> parking lot 1.5 x = 425 mm
-# STEERING LOCK (checkpoint F, replaces the #78 placeholder). The owner's
-# measured full-lock turning radii (OpenRound.cpp: left 27 cm, right 25 cm),
-# "measured from the outer wheel to the centre of the circle the car traces at
-# full lock". Taken as the OUTER FRONT wheel (the usual turning-circle
-# convention), at WHEELBASE_MM ahead of the rear axle and TRACK_MM / 2 out:
+# STEERING LOCK -- PLACEHOLDER (owner, checkpoint F: "keep these lock values as
+# placeholders"). Converted from the owner's full-lock radii (OpenRound.cpp: left
+# 27 cm, right 25 cm), which were computed from encoder distance / IMU heading
+# change, as if they were measured at the OUTER FRONT wheel:
 #   rear-axle radius R = sqrt(R_w^2 - 135.9^2) - 50.5 -> 182.8 mm left / 159.3 mm right
 #   lock = atan(135.9 / R) = 36.6 / 40.5 deg (bicycle-equivalent road-wheel angle)
-# If the radii were to the outer REAR wheel instead: R = R_w - 50.5 -> 219.5 /
-# 199.5 mm -> 31.8 / 34.3 deg. Must match firmware/drive_bridge/drive_protocol.h.
-STEER_LOCK_LEFT_DEG = 36.6
-STEER_LOCK_RIGHT_DEG = 40.5
+# The encoder counts the (solid, gear-driven) rear axle, so the radius is more
+# likely a rear-axle one: outer rear wheel 31.8 / 34.3 deg, rear-axle midpoint
+# 26.7 / 28.5 deg (CHANGES 17.2). MEASURE (RUNNING_ON_THE_ROBOT 6.5) and replace.
+# Live-tunable from the dashboard; also sent to the firmware (drive_link.sync_params).
+STEER_LOCK_LEFT_DEG = 36.6           # PLACEHOLDER
+STEER_LOCK_RIGHT_DEG = 40.5          # PLACEHOLDER
 # Servo mapping for the drive firmware (v7's values: straight 76.5, left stop 20,
 # right stop 140 servo degrees; below straight steers LEFT). Road-wheel angle is
 # taken as linear in servo angle between straight and each stop -- a PLACEHOLDER
@@ -234,6 +235,15 @@ STEER_LOCK_RIGHT_DEG = 40.5
 SERVO_STRAIGHT_DEG = 76.5
 SERVO_LEFT_STOP_DEG = 20.0
 SERVO_RIGHT_STOP_DEG = 140.0
+# Drive-firmware speed loop (checkpoint F2): PWM = SPEED_KFF * v + SPEED_OFFSET_PWM
+# (feed-forward) + PI on the encoder speed. PLACEHOLDERS: no speed / PWM pair of this
+# motor has been measured; drive_calibrate.py measures KFF and OFFSET. The Pi sends
+# these, the servo map, the lock and the encoder scale to the STM32 at connection and
+# whenever they change (PARAM frames), so no re-flash is needed to change them.
+SPEED_KFF = 0.20                     # PWM per mm/s          PLACEHOLDER
+SPEED_OFFSET_PWM = 25.0              # PWM to start turning  PLACEHOLDER
+SPEED_KP = 0.10                      # PWM per mm/s of error PLACEHOLDER
+SPEED_KI = 0.50                      # PWM per mm of error   PLACEHOLDER
 
 # --- Path planner (checkpoint E, vg_planner.py) -----------------------------
 # The planner's minimum radius is the lock radius x this factor, so the follower
@@ -287,6 +297,10 @@ START_STILL_YAW_DEG = 0.3            # ... and the yaw at most this
 START_SCAN_MARGIN_S = 0.1            # use LIDAR returns measured this long after the rest began
 START_MIN_RETURNS = 300              # fewer fresh returns: wait for more
 START_RETRY_S = 0.5                  # a failed initialisation is retried this often while at rest
+# Dashboard (checkpoint F2): the planner preview -- what the mission would plan from
+# the tracked pose and the seats perceived so far -- is re-planned this often.
+PLAN_PREVIEW_ENABLED = True
+PLAN_PREVIEW_S = 0.5
 # Steering law: "rwf" = rear-wheel feedback (curvature feed-forward + lateral and
 # heading error feedback), "pp" = pure pursuit. See follower.py.
 FOLLOWER_MODE = "rwf"

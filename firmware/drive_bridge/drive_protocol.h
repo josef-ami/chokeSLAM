@@ -19,6 +19,14 @@
 //   run_state: 0 READY, 1 RUNNING, 2 STOPPED, 3 FINISHED;  run_id: runs started since boot
 //   pwm: motor PWM applied (-255..255);  speed_mmps: the encoder speed estimate
 //
+// PARAM frame (Pi -> STM32, checkpoint F2), 8 bytes: the tuning values below
+// can be changed live, with no re-flash:
+//   0xAA 0x56 | id u8 | value float32 little-endian | xor8 over id and the 4 value bytes
+//   id 0xFF (value ignored) = report every value. Every accepted or reported value
+//   is echoed as  $PAR,<id>,<value>\n ; a value outside its range is clamped
+//   (the echo shows what was applied). Values fall back to the compiled
+//   defaults at power-up; the Pi re-sends config.py's (drive_link.sync_params).
+//
 // RUN STATE (the owner's button rule, checkpoint F):
 //   READY / STOPPED / FINISHED --press, Pi ready--> RUNNING (run_id + 1)
 //   RUNNING --press--> STOPPED          (motor off at once, whatever the Pi sends)
@@ -36,8 +44,8 @@ namespace drive {
 enum Mode : uint8_t { DIRECT = 0, HEADING_HOLD = 1, STOP = 2 };
 enum RunState : uint8_t { READY = 0, RUNNING = 1, STOPPED = 2, FINISHED = 3 };
 
-const uint8_t SYNC0 = 0xAA, SYNC1 = 0x55;
-const uint8_t FRAME_LEN = 11;
+const uint8_t SYNC0 = 0xAA, SYNC1 = 0x55, SYNC1_PARAM = 0x56;
+const uint8_t FRAME_LEN = 11, PARAM_LEN = 8;
 const uint32_t WATCHDOG_MS = 250;
 
 const uint8_t FL_ENABLE = 1 << 0, FL_CLOSED_LOOP = 1 << 1, FL_PI_READY = 1 << 4, FL_RUN_OVER = 1 << 5;
@@ -56,20 +64,36 @@ struct Command {
   int16_t headingDdeg = 0;
 };
 
-// Byte-at-a-time parser: resyncs by sliding one byte on any mismatch; a frame
-// failing its checksum is dropped and counted, never acted on.
+struct ParamMsg {
+  uint8_t id = 0;
+  float value = 0.0f;
+};
+
+// Byte-at-a-time parser for both frames: resyncs by sliding one byte on any
+// mismatch; a frame failing its checksum is dropped and counted, never acted on.
 class Parser {
  public:
-  uint32_t good = 0, bad = 0;
-  // returns true when `out` holds a new valid command
-  bool feed(uint8_t b, Command &out) {
+  uint32_t good = 0, bad = 0, params = 0;
+  enum Kind : uint8_t { NONE = 0, DRIVE = 1, PARAM = 2 };
+  // returns DRIVE when `out` holds a new valid command, PARAM when `pm` holds a parameter
+  Kind feed(uint8_t b, Command &out, ParamMsg &pm) {
     buf_[n_++] = b;
     while (n_ > 0) {
-      if (buf_[0] != SYNC0 || (n_ > 1 && buf_[1] != SYNC1)) { shift(1); continue; }
-      if (n_ < FRAME_LEN) return false;
+      if (buf_[0] != SYNC0 || (n_ > 1 && buf_[1] != SYNC1 && buf_[1] != SYNC1_PARAM)) { shift(1); continue; }
+      if (n_ < 2) return NONE;
+      uint8_t len = buf_[1] == SYNC1 ? FRAME_LEN : PARAM_LEN;
+      if (n_ < len) return NONE;
       uint8_t x = 0;
-      for (int i = 2; i < 10; i++) x ^= buf_[i];
-      if (x != buf_[10]) { bad++; shift(1); continue; }
+      for (int i = 2; i < len - 1; i++) x ^= buf_[i];
+      if (x != buf_[len - 1]) { bad++; shift(1); continue; }
+      if (len == PARAM_LEN) {
+        pm.id = buf_[2];
+        uint32_t u = (uint32_t)buf_[3] | ((uint32_t)buf_[4] << 8) | ((uint32_t)buf_[5] << 16) | ((uint32_t)buf_[6] << 24);
+        memcpy(&pm.value, &u, 4);
+        shift(PARAM_LEN);
+        params++;
+        return PARAM;
+      }
       out.seq = buf_[2];
       uint8_t f = buf_[3];
       out.enable = f & FL_ENABLE;
@@ -83,9 +107,14 @@ class Parser {
       out.headingDdeg = (int16_t)(buf_[8] | (buf_[9] << 8));
       shift(FRAME_LEN);
       good++;
-      return true;
+      return DRIVE;
     }
-    return false;
+    return NONE;
+  }
+  // the checkpoint-E signature: DRIVE frames only
+  bool feed(uint8_t b, Command &out) {
+    ParamMsg pm;
+    return feed(b, out, pm) == DRIVE;
   }
 
  private:
@@ -148,9 +177,11 @@ struct Run {
 // Road-wheel angle (deg, + = LEFT) -> servo angle (deg). Linear between
 // straight and each stop (config.py SERVO_*, STEER_LOCK_*): below straight
 // steers LEFT. Clamped to the stops.
-// lockLeftDeg / lockRightDeg: the bicycle-equivalent wheel angle at each stop,
-// from the owner's full-lock radii (outer wheel -> turn centre: 270 mm left,
-// 250 mm right) with wheelbase 135.9 and track 101 (config.py STEER_LOCK_*).
+// lockLeftDeg / lockRightDeg: the bicycle-equivalent wheel angle at each stop.
+// PLACEHOLDERS (owner, checkpoint F): converted from the owner's full-lock radii
+// (270 mm left, 250 mm right, computed from encoder distance / IMU heading
+// change) as if taken at the outer front wheel; see CHANGES 17.2. Live-settable
+// (PARAM ids 4, 5); config.py STEER_LOCK_* is the source of truth.
 struct SteerMap {
   float straight = 76.5f, leftStop = 20.0f, rightStop = 140.0f;
   float lockLeftDeg = 36.6f, lockRightDeg = 40.5f;
@@ -207,6 +238,7 @@ struct SpeedEstimator {
 // The integrator is reset on a zero target or a direction change and frozen
 // while the output is saturated. Values are PLACEHOLDERS until
 // drive_calibrate.py has measured the motor (docs/RUNNING_ON_THE_ROBOT.md).
+// Live-settable (PARAM ids 6-9); config.py SPEED_* is the source of truth.
 struct SpeedPI {
   float kff = 0.20f;      // PWM per mm/s
   float offset = 25.0f;   // PWM
@@ -236,6 +268,60 @@ struct SpeedPI {
     return p;
   }
 };
+
+// The live-tunable values (PARAM frame). Ids are fixed: drive_link.FW_PARAMS mirrors them.
+enum ParamId : uint8_t {
+  P_SERVO_STRAIGHT = 1, P_SERVO_LEFT_STOP = 2, P_SERVO_RIGHT_STOP = 3, P_LOCK_LEFT = 4, P_LOCK_RIGHT = 5,
+  P_KFF = 6, P_OFFSET = 7, P_KP = 8, P_KI = 9, P_TICKS_PER_MM = 10, P_COUNT = 11, P_REPORT_ALL = 0xFF
+};
+
+struct Tunables {
+  SteerMap *steer;
+  SpeedPI *pi;
+  float *ticksPerMm;
+  static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  // apply a value (clamped to its range); false for an unknown id or a non-finite value
+  bool set(uint8_t id, float v) {
+    if (!(v == v) || v > 1e9f || v < -1e9f) return false;
+    switch (id) {
+      case P_SERVO_STRAIGHT:   steer->straight = clampf(v, steer->leftStop + 1.0f, steer->rightStop - 1.0f); break;
+      case P_SERVO_LEFT_STOP:  steer->leftStop = clampf(v, 0.0f, steer->straight - 1.0f); break;
+      case P_SERVO_RIGHT_STOP: steer->rightStop = clampf(v, steer->straight + 1.0f, 180.0f); break;
+      case P_LOCK_LEFT:        steer->lockLeftDeg = clampf(v, 5.0f, 80.0f); break;
+      case P_LOCK_RIGHT:       steer->lockRightDeg = clampf(v, 5.0f, 80.0f); break;
+      case P_KFF:              pi->kff = clampf(v, 0.0f, 5.0f); break;
+      case P_OFFSET:           pi->offset = clampf(v, 0.0f, 200.0f); break;
+      case P_KP:               pi->kp = clampf(v, 0.0f, 5.0f); break;
+      case P_KI:               pi->ki = clampf(v, 0.0f, 20.0f); pi->integ = 0.0f; break;
+      case P_TICKS_PER_MM:     *ticksPerMm = clampf(v, 0.1f, 20.0f); break;
+      default: return false;
+    }
+    return true;
+  }
+  bool get(uint8_t id, float &v) const {
+    switch (id) {
+      case P_SERVO_STRAIGHT:   v = steer->straight; break;
+      case P_SERVO_LEFT_STOP:  v = steer->leftStop; break;
+      case P_SERVO_RIGHT_STOP: v = steer->rightStop; break;
+      case P_LOCK_LEFT:        v = steer->lockLeftDeg; break;
+      case P_LOCK_RIGHT:       v = steer->lockRightDeg; break;
+      case P_KFF:              v = pi->kff; break;
+      case P_OFFSET:           v = pi->offset; break;
+      case P_KP:               v = pi->kp; break;
+      case P_KI:               v = pi->ki; break;
+      case P_TICKS_PER_MM:     v = *ticksPerMm; break;
+      default: return false;
+    }
+    return true;
+  }
+};
+
+inline int formatParam(char *buf, int n, uint8_t id, float v) {
+  // no %f in newlib-nano's default printf: fixed point with 4 decimals
+  long scaled = (long)(v * 10000.0f + (v >= 0 ? 0.5f : -0.5f));
+  unsigned long a = (unsigned long)(scaled < 0 ? -scaled : scaled);
+  return snprintf(buf, n, "$PAR,%u,%s%lu.%04lu\n", (unsigned)id, scaled < 0 ? "-" : "", a / 10000UL, a % 10000UL);
+}
 
 inline int formatStatus(char *buf, int n, uint8_t seqAck, uint8_t status, RunState rs, uint32_t runId,
                         int pwm, float speedMmps) {

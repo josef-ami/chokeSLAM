@@ -1890,7 +1890,15 @@ The rear-axle midpoint turns on a circle of radius R about a centre on the rear-
 | left | 270 mm | 182.8 mm | **36.6°** | 46.8° (R 127.4) |
 | right | 250 mm | 159.3 mm | **40.5°** | 54.6° (R 96.4) |
 
-If the radii were measured to the outer **rear** wheel instead, R = R_w − 50.5 = 219.5 / 199.5 mm, lock 31.8° / 34.3°. **To confirm with the owner.** The values are in `config.py` (`STEER_LOCK_*`) and `drive_protocol.h` (`SteerMap`); the firmware test fails if they differ.
+If the radii were measured to the outer **rear** wheel instead, R = R_w − 50.5 = 219.5 / 199.5 mm, lock 31.8° / 34.3°. The values are in `config.py` (`STEER_LOCK_*`) and `drive_protocol.h` (`SteerMap`); the firmware test fails if they differ.
+
+**Owner's clarification (#95): the radii were computed from encoder and IMU data**, i.e. R = encoder distance / heading change.
+- The CAD model has no differential: the motor drives the rear axle through two spur gears (18 and 23 teeth).
+- So that is the radius of a point on the rear axle, not of the outer front wheel.
+- Read that way the lock is smaller: 31.8° / 34.3° at the outer rear wheel, 26.7° / 28.5° at the rear-axle midpoint.
+- In the §17.5 sweep that is 20.5 % and 4 % success at factor 1.25, or 70.5 % and 20.5 % at factor 1.0.
+
+**Owner's decision (#96): keep 36.6° / 40.5° as PLACEHOLDERS** and say so in the documentation. They are marked PLACEHOLDER in `config.py`, `drive_protocol.h`, the dashboard, the README and the robot guide. They can now be changed live from the dashboard with no re-flash (§18).
 
 ### 17.3 The firmware (`firmware/drive_bridge/`)
 
@@ -1960,6 +1968,10 @@ The measured lock is much weaker than the placeholder. Closed-loop sweep, 200 ru
 | **measured 36.6 / 40.5** | **1.25 (current)** | **82 / 166 (49 %)** |
 | measured | 1.1 | 137 / 166 (82.5 %) |
 | measured | 1.0 (no steering margin) | 146 / 166 (88 %) |
+| outer rear wheel 31.8 / 34.3 | 1.25 | 34 / 166 (20.5 %) |
+| outer rear wheel 31.8 / 34.3 | 1.0 | 117 / 166 (70.5 %) |
+| rear-axle midpoint 26.7 / 28.5 | 1.25 | 7 / 166 (4 %) |
+| rear-axle midpoint 26.7 / 28.5 | 1.0 | 34 / 166 (20.5 %) |
 
 At factor 1.25 there are 84 failures:
 - **65 "at the viewing pose but the tracker is in lane N+1", mostly CCW.** The viewing pose sits on the new lane's centre line (VIEW_Y 500). With the 229 mm left planning radius, reaching it needs the turn to start 271 mm from the outer wall. When a pillar must be passed on the inner side, that is impossible, and the cheapest path the planner finds is a 270° loop the other way round. The tracker's turn rule reads that loop as a lane change.
@@ -2006,3 +2018,88 @@ The firmware work does not depend on this choice.
 
 - **New:** `run_control.py`, `drive_calibrate.py`, `test_run_control.py`.
 - **Changed:** `firmware/drive_bridge/drive_bridge.ino`, `firmware/drive_bridge/drive_protocol.h`, `drive_link.py` (flags, run state), `stm32_link.py` (`$STA` long form), `run_mission.py` (runs until stopped, via `run_control`), `config.py` (`STEER_LOCK_*`, `START_*`), `test_drive_firmware.py`, `docs/RUNNING_ON_THE_ROBOT.md`, `README.md`.
+
+## 18. Checkpoint F2: live tuning and the planned path on the dashboard
+
+The owner asked (24 Sept): "keep these lock values as placeholders and mention so in the documentation. Keep as many of the tuning values and parameters as possible modifiable live from the dashboard. Also on the dashboard, continuously draw the planned path my path planner builds after perception."
+
+### 18.1 Decision log (checkpoint F2)
+
+| # | Question | Owner's answer / what was done |
+|---|---|---|
+| 95 | How the 27 / 25 cm radii were measured | "we calculated using encoder and IMU data" (§17.2) |
+| 96 | Lock values | keep 36.6° / 40.5° as placeholders, documented as such (§17.2) |
+| 97 | Live tuning | every value in the panel that the code reads at use time; the drive firmware's values over a new PARAM frame (§18.2) |
+| 98 | Planned path | drawn continuously: the planner preview while tracking, the mission's own path during a run (§18.3) |
+
+### 18.2 Live tuning
+
+- **The panel: 10 groups, 110 values**, each with its meaning and when it takes effect.
+  - The checkpoint-C groups: LIDAR, initialisation, tracker, seat detector. Additions to them: `INIT_USE_WALL_YAW`, `RECHECK_EXTEND`, `RECHECK_AHEAD_MIN_MM`, `RECHECK_START_LANE_ON_RETURN`.
+  - New groups: steering and drive firmware, planner, mission and speeds, path follower, run control, pillar colour and camera.
+  - A value applies either at once, at the next plan, or at the next initialisation; the panel says which. Almost everything on the Pi is read at use time, so almost everything is live.
+  - New value kinds:
+    - booleans;
+    - lists as JSON, e.g. `VIEW_X_MM`, or the hue ranges `[[0, 10], [170, 179]]`, which must keep their nested shape;
+    - choices, e.g. `FOLLOWER_MODE`.
+  - Edits stay in memory. Reset restores `config.py`.
+- **Drive firmware values without re-flashing:**
+  - The values: servo straight and stops, steering lock (left / right), the speed loop (`SPEED_KFF`, `SPEED_OFFSET_PWM`, `SPEED_KP`, `SPEED_KI`, new in `config.py`), and the encoder scale.
+  - A **PARAM frame** carries them: `AA 56 | id | float32 LE | xor8`, 8 bytes, parsed next to the DRIVE frame by the same parser.
+  - The STM32 clamps each value to a sane range, applies it, and echoes `$PAR,<id>,<value>`. Id 0xFF asks for every value.
+  - **`config.py` is the source of truth.** Every 0.5 s, `drive_link.sync_params` compares the STM32's echoes with `config.py` and re-sends what differs. That covers:
+    - a dashboard edit;
+    - an STM32 restart, which brings back the compiled defaults (detected as the `$IMU` sequence going backwards);
+    - a value the STM32 clamped. That one stays shown as a mismatch.
+  - The run supervisor, the dashboard (real mode) and `drive_calibrate.py` all keep it in sync. The panel shows the STM32's echo next to each firmware value, in red while it differs.
+
+### 18.3 The planned path on the dashboard
+
+- **Planner preview.** While a tracker exists, the preview re-plans every `PLAN_PREVIEW_S` (0.5 s) from the tracked pose and the seats and colours perceived so far. **It plans in a worker process** (`plan_view.preview_job`, spawned, one worker).
+  - **Why a process:** a first version planned on a thread. It held the interpreter lock for tens to hundreds of ms per plan, and `test_dashboard`'s real-mode test then gave 2–4 wrong entry verdicts, where `main` gives 0 with `LIDAR_TIME_OFFSET_S = 0`. The tracker's loop and the reader threads that stamp arrival times were waiting on it.
+  - With the process: 0 wrong in 3 of 3 runs.
+  - Each request carries the current config values, because the dashboard edits them live and the worker has its own copy of `config`.
+  - It plans what the mission would plan from that state: on lap 1, to the next lane's viewing pose; on laps 2–3, the rest of the round and the finish.
+  - The goal and world construction moved out of `Mission` into module functions (`lap1_request`, `final_world`, `finish_goals`, `laps_left_and_cps`, `plan_with_retry`, `plan_preview`) that the mission itself now calls, so the preview cannot drift from the mission.
+  - A 40-layout sweep is identical row for row before and after the move.
+- **Mission mode**, where during a run the page draws the mission's own current path and redraws it on every re-plan:
+  - `python3 run_mission.py --dashboard` on the robot, for practice only (no wireless during rounds).
+  - `python3 dashboard_server.py --mission` in the mock: `mission_sim.py`, a simulated car on a rulebook layout, driven by the real run supervisor and mission, with a Python copy of the firmware's run logic. It has buttons for the start button, for carrying the car back, and for a new layout. The mock runs at 1× only: faster, the car keeps moving on its last command while the planner computes.
+- **What is drawn:**
+  - the planned path (magenta);
+  - the planner's goals (yellow circles with their heading);
+  - the pass-side lines, coloured by the pillar;
+  - optionally, the forward-only lines;
+  - a line with what was planned and how long it took.
+- **A mission card:** the STM32's run state and id, the Pi's readiness, the mission phase, plans and re-plans, runs, events and run-control lines.
+
+### 18.4 Tests
+
+- `test_drive_firmware.py`:
+  - PARAM frames through the parser, including split and corrupted frames;
+  - clamping, and an unknown id or NaN refused;
+  - the `$PAR` format;
+  - new `test_param_sync`: a report request, then all 10 values sent when nothing has been echoed; `$PAR` parsed with no bad lines; a missing and a clamped value re-sent; an edit sent at the next sync; an STM32 restart re-sends everything.
+- `test_dashboard.py`:
+  - The preview follows the tracker in the tracking mock. That mock's robot drives a scripted route, not the planner's, so many previews find no path from where it is.
+  - The 10 groups and 110 values; booleans, lists (shape-checked) and choices are validated, and Reset restores them.
+  - New `test_mission_mock`: READY with the preview; firmware values echoed, with a live edit and Reset reaching the STM32; the button runs the mission and the page shows the mission's own path, redrawn on new plans; a second press stops it; carried back, it is READY with a new preview; a new layout initialises.
+  - Its real-mode stand-in test still reports 4 wrong seats with `LIDAR_TIME_OFFSET_S = −0.05`, as before (§16.13).
+- `test_run_control.py` now takes its `World` from `mission_sim.py`; same result.
+- `test_dashboard.py` real mode (the stand-in STM32 and LIDAR on the real clock), with `LIDAR_TIME_OFFSET_S = 0`: passes with the preview in its process (3 of 3), as `main` does. The preview on a thread failed it, which is why it moved.
+- **The mission itself still plans on the control loop's thread,** as it has since checkpoint E: during lap-1 re-plans and laps-2–3 re-plans it holds the interpreter for that long. The closed-loop simulation is synchronous and cannot show the effect. **To watch on the robot:** wrong entry verdicts right after a re-plan. The remedy is the same worker process; not done without your approval, because it changes the mission's timing.
+- The page was checked in Chromium (Playwright) in mission-mock mode: no script errors.
+
+### 18.5 Files
+
+- **New:** `mission_sim.py`.
+- **Changed:**
+  - `firmware/drive_bridge/drive_protocol.h` and `drive_bridge.ino` (PARAM frame, `$PAR`, `Tunables`);
+  - `drive_link.py` (`encode_param`, `sync_params`, `param_mismatch`);
+  - `stm32_link.py` (`$PAR`; echoes cleared on an STM32 restart);
+  - `run_control.py` (sync, seat params, `tracker()`);
+  - `mission.py` (the shared planning functions, `plan_preview`);
+  - `dashboard_server.py`, `templates/dashboard.html`;
+  - `run_mission.py` (`--dashboard`), `drive_calibrate.py`;
+  - `config.py` (`SPEED_*`, `PLAN_PREVIEW_*`, lock placeholders);
+  - the tests, the README and the robot guide.

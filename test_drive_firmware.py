@@ -28,7 +28,8 @@ import tempfile
 import time
 
 import config
-from drive_link import DriveLink, encode, FLAG_PI_READY, FLAG_RUN_OVER
+from drive_link import (DriveLink, encode, encode_param, fw_wanted, FLAG_PI_READY, FLAG_RUN_OVER,
+                        PARAM_REPORT_ALL)
 from follower import DriveCmd
 from stm32_link import Stm32Link
 
@@ -40,15 +41,32 @@ HARNESS = r'''
 #include <math.h>
 using namespace drive;
 int main() {
-  Parser p; Command c; SteerMap m;
+  Parser p; Command c; SteerMap m; ParamMsg pm;
   int ch;
   while ((ch = getchar()) != EOF) {
-    if (p.feed((uint8_t)ch, c))
+    Parser::Kind k = p.feed((uint8_t)ch, c, pm);
+    if (k == Parser::DRIVE)
       printf("CMD %u %d %d %d %d %d %d %d\n", c.seq, c.enable, c.closedLoop, (int)c.mode, c.steerDdeg, c.speedMmps,
              c.piReady, c.runOver);
+    else if (k == Parser::PARAM)
+      printf("PARAM %u %.4f\n", pm.id, pm.value);
   }
-  printf("GOOD %u BAD %u\n", p.good, p.bad);
+  printf("GOOD %u BAD %u PARAMS %u\n", p.good, p.bad, p.params);
+  // tunables: set, clamp, get, echo format
+  {
+    SteerMap sm; SpeedPI sp; float tpm = 1.4853f; Tunables tu{&sm, &sp, &tpm};
+    char b2[48]; float v;
+    int ok1 = tu.set(P_SERVO_STRAIGHT, 80.25f), ok2 = tu.set(P_LOCK_LEFT, 200.0f), ok3 = tu.set(P_KFF, 0.123f);
+    int ok4 = tu.set(P_TICKS_PER_MM, 1.5f), ok5 = tu.set(42, 1.0f), ok6 = tu.set(P_KP, 0.0f / 0.0f);
+    int ok7 = tu.set(P_SERVO_LEFT_STOP, 95.0f);                  // beyond straight: clamped to straight - 1
+    printf("TUN %d %d %d %d %d %d %d", ok1, ok2, ok3, ok4, ok5, ok6, ok7);
+    for (uint8_t id = 1; id < P_COUNT; id++) { tu.get(id, v); printf(" %.4f", v); }
+    printf(" %d\n", (int)tu.get(0, v));
+    formatParam(b2, sizeof b2, P_SERVO_STRAIGHT, sm.straight); printf("PARFMT %s", b2);
+    formatParam(b2, sizeof b2, 9, -0.00005f); printf("PARFMT %s", b2);
+  }
   printf("LOCK %.2f %.2f %.2f %.2f %.2f\n", m.lockLeftDeg, m.lockRightDeg, m.straight, m.leftStop, m.rightStop);
+  { SpeedPI d0; printf("PIDEF %.4f %.4f %.4f %.4f\n", d0.kff, d0.offset, d0.kp, d0.ki); }
   float angles[] = {0.0f, m.lockLeftDeg, -m.lockRightDeg, m.lockLeftDeg / 2, -m.lockRightDeg / 2, 90.0f, -90.0f};
   for (float a : angles) printf("SERVO %.2f %.3f\n", a, m.servoFor(a));
 
@@ -220,8 +238,11 @@ def test_firmware_protocol():
     assert frames[1][3] & FLAG_PI_READY and frames[2][3] & FLAG_RUN_OVER
     bad = bytearray(frames[1])
     bad[6] ^= 0x10                                         # corrupt one body byte of a copy
-    stream = b"\x00\x55\xAA" + frames[0] + b"garbage" + bytes(bad) + frames[1] + frames[2][:5] + frames[2][5:] \
-        + b"\xAA" + frames[3]
+    badp = bytearray(encode_param(4, 30.0))
+    badp[4] ^= 0x01
+    stream = b"\x00\x55\xAA" + frames[0] + b"garbage" + bytes(bad) + frames[1] + encode_param(1, 77.25) \
+        + frames[2][:5] + frames[2][5:] + bytes(badp) + b"\xAA" + encode_param(6, 0.2)[:3] + encode_param(6, 0.2)[3:] \
+        + frames[3] + encode_param(PARAM_REPORT_ALL, 0.0)
     out = subprocess.run([exe], input=stream, capture_output=True, check=True).stdout.decode()
     lines = out.splitlines()
 
@@ -233,11 +254,22 @@ def test_firmware_protocol():
             ["9", "0", "0", "2", "0", "0", "1", "1"], ["10", "1", "0", "0", "366", "120", "0", "0"]]
     assert got == want, (got, want)
     gb = rows("GOOD")[0]
-    assert gb[0] == "4" and int(gb[2]) >= 1, gb
+    assert gb[0] == "4" and int(gb[2]) >= 2 and gb[4] == "3", gb
+    assert rows("PARAM") == [["1", "77.2500"], ["6", "0.2000"], ["255", "0.0000"]], rows("PARAM")
+    tun = rows("TUN")[0]
+    assert tun[:7] == ["1", "1", "1", "1", "0", "0", "1"], tun
+    vals = [float(v) for v in tun[7:17]]
+    assert vals == [80.25, 79.25, 140.0, 80.0, 40.5, 0.123, 25.0, 0.1, 0.5, 1.5], vals
+    assert tun[17] == "0", tun
+    assert rows("PARFMT") == [["$PAR,1,80.2500"], ["$PAR,9,-0.0001"]] or \
+        rows("PARFMT") == [["$PAR,1,80.2500"], ["$PAR,9,-0.0000"]], rows("PARFMT")
 
     lock = [float(v) for v in rows("LOCK")[0]]
     assert lock == [config.STEER_LOCK_LEFT_DEG, config.STEER_LOCK_RIGHT_DEG, config.SERVO_STRAIGHT_DEG,
                     config.SERVO_LEFT_STOP_DEG, config.SERVO_RIGHT_STOP_DEG], ("firmware and config.py disagree", lock)
+    pid = [float(v) for v in rows("PIDEF")[0]]
+    assert pid == [config.SPEED_KFF, config.SPEED_OFFSET_PWM, config.SPEED_KP, config.SPEED_KI], \
+        ("firmware SpeedPI defaults and config.py SPEED_* disagree", pid)
     servo = [(float(a), float(s)) for a, s in rows("SERVO")]
     st, ls, rs = config.SERVO_STRAIGHT_DEG, config.SERVO_LEFT_STOP_DEG, config.SERVO_RIGHT_STOP_DEG
     want_s = [st, ls, rs, (st + ls) / 2, (st + rs) / 2, ls, rs]
@@ -264,7 +296,7 @@ def test_firmware_protocol():
     assert sta.strip() == "STA $STA,42,21,1,3,-87,-202", sta
     print("PASS  test_firmware_protocol   4/4 frames decoded from drive_link bytes (PI_READY / RUN_OVER bits) through "
           f"garbage, a corrupted frame (dropped, bad={gb[2]}) and a split frame; servo map = config.py; watchdog; "
-          "no motor outside RUNNING; button debounce (held at boot, bounce, lockout); run states "
+          "PARAM frames (3 decoded, a corrupted one dropped), clamping, unknown / NaN refused, $PAR format; no motor outside RUNNING; button debounce (held at boot, bounce, lockout); run states "
           "start/stop/restart/finish/ignored; speed loop within 5 % in 2 s, overshoot < 25 %, reverse; $STA format")
 
 
@@ -338,8 +370,76 @@ def test_link_status_and_refusal():
           "byte-exact")
 
 
+def _frames(data: bytes):
+    """Split a byte string of DRIVE / PARAM frames."""
+    out, i = [], 0
+    while i < len(data):
+        n = 11 if data[i + 1] == 0x55 else 8
+        out.append(data[i:i + n])
+        i += n
+    return out
+
+
+def test_param_sync():
+    import struct
+    master, slave = pty.openpty()
+    os.set_blocking(master, False)
+    import tty
+    tty.setraw(slave)
+    link = Stm32Link(stream=os.fdopen(slave, "r+b", buffering=0))
+    link.start()
+    drv = DriveLink(link)
+
+    def sent():
+        time.sleep(0.05)
+        try:
+            return _frames(os.read(master, 8192))
+        except BlockingIOError:
+            return []
+
+    def params(fr):
+        return {f[2]: struct.unpack("<f", f[3:7])[0] for f in fr if f[1] == 0x56}
+
+    want = fw_wanted()
+    assert len(want) == 10 and abs(want[10] - config.ENCODER_TICKS_PER_CM / 10) < 1e-9
+    # nothing echoed yet: a report request and every value
+    os.write(master, b"$IMU,1,10,0,1.00\n")
+    assert drv.sync_params(now=100.0) == 11
+    p = params(sent())
+    assert p.pop(PARAM_REPORT_ALL) == 0.0 and set(p) == set(want), p
+    assert drv.sync_params(now=100.2) == 0                         # rate-limited
+    # the STM32 echoes all but one (and one clamped value)
+    lines = "".join(f"$PAR,{k},{v:.4f}\n" for k, v in want.items() if k != 7)
+    os.write(master, lines.replace(f"$PAR,4,{want[4]:.4f}", "$PAR,4,80.0000").encode())
+    time.sleep(0.05)
+    assert link.status()["lines_bad"] == 0
+    mm = drv.param_mismatch()
+    assert set(mm) == {"SPEED_OFFSET_PWM", "STEER_LOCK_LEFT_DEG"} and mm["STEER_LOCK_LEFT_DEG"][1] == 80.0, mm
+    assert drv.sync_params(now=101.0) == 2 and set(params(sent())) == {4, 7}
+    # an edit (the dashboard sets config) is sent at the next sync
+    os.write(master, f"$PAR,4,{want[4]:.4f}\n$PAR,7,{want[7]:.4f}\n".encode())
+    time.sleep(0.05)
+    assert drv.param_mismatch() == {}
+    old = config.SERVO_STRAIGHT_DEG
+    config.SERVO_STRAIGHT_DEG = old + 1.5
+    try:
+        assert drv.sync_params(now=102.0) == 1 and params(sent()) == {1: old + 1.5}
+    finally:
+        config.SERVO_STRAIGHT_DEG = old
+    # an STM32 restart (seq goes back) forgets the echoes: everything is sent again
+    os.write(master, b"$IMU,2,20,0,1.00\n$IMU,1,5,0,1.00\n")
+    time.sleep(0.05)
+    assert link.status()["seq_resets"] == 1 and link.status()["fw_params"] == {}
+    assert drv.sync_params(now=103.0) == 11
+    link.stop()
+    print("PASS  test_param_sync          firmware values = config.py: report request + all 10 sent when nothing is "
+          "echoed; $PAR echoes parsed (0 bad lines); a missing and a clamped value re-sent; a config edit sent at the "
+          "next sync; an STM32 restart re-sends everything")
+
+
 if __name__ == "__main__":
     test_firmware_protocol()
     test_sketch_compiles()
     test_link_status_and_refusal()
+    test_param_sync()
     print("\nAll drive-link checks passed.")

@@ -3,9 +3,9 @@ Speed-loop calibration for the drive firmware (checkpoint F).
 
     python3 drive_calibrate.py [--speeds 150,250,400,600,800] [--hold 1.5] [--closed 300,500,800,-200]
 
-The firmware's feed-forward (SpeedPI kff, offset in drive_protocol.h) are
-placeholders: no speed / PWM pair of this motor had been measured. This tool
-measures them. Put the car on a stand (wheels free) for a first fit, then
+The firmware's feed-forward (config.py SPEED_KFF, SPEED_OFFSET_PWM, which the
+Pi sends to the STM32) are placeholders: no speed / PWM pair of this motor had
+been measured. This tool measures them. Put the car on a stand (wheels free) for a first fit, then
 repeat on the floor with a clear 3 m straight for the values to use.
 
     1. Start it; the status LED goes solid (this tool sends PI_READY).
@@ -13,7 +13,8 @@ repeat on the floor with a clear 3 m straight for the values to use.
     3. OPEN LOOP: for each requested speed the firmware applies its feed-
        forward PWM (reported in $STA); the true speed comes from the encoder
        ($IMU). A straight line  speed = a * (pwm - offset)  is fitted, and the
-       kff (= 1 / a) and offset to put in drive_protocol.h are printed.
+       SPEED_KFF (= 1 / a) and SPEED_OFFSET_PWM to put in config.py (or to
+       type into the dashboard's tuning panel) are printed. No re-flash.
     4. CLOSED LOOP (with --closed): each speed with the PI on; the settled
        speed and the time to reach 90 % are printed.
     5. The run ends by itself (RUN_OVER); a press stops it at any time.
@@ -40,6 +41,7 @@ def hold(link, drive, speed, secs, closed):
     while time.monotonic() - t0 < secs:
         if drive.run_state()[0] != RUN_RUNNING:
             return out, True
+        drive.sync_params()
         drive.send(DriveCmd(0.0, speed), closed_loop=closed)
         sta = link.status()["sta"]
         for s in link.drain():
@@ -81,6 +83,7 @@ def main():
             if drive.run_state()[0] is None:
                 print("no run state in $STA: is the checkpoint-F drive_bridge firmware flashed?")
             link.drain()
+            drive.sync_params()
             drive.send(STOP)
             time.sleep(0.05)
         drive.ready = False
@@ -104,7 +107,7 @@ def main():
             if slope > 0:
                 off = mx - my / slope
                 print(f"\n  fit: speed = {slope:.3f} * (pwm - {off:.1f})")
-                print(f"  -> drive_protocol.h SpeedPI:  kff = {1.0 / slope:.3f}f;  offset = {off:.1f}f;")
+                print(f"  -> config.py:  SPEED_KFF = {1.0 / slope:.3f}   SPEED_OFFSET_PWM = {off:.1f}")
                 print(f"     top speed at pwm 255 about {slope * (255 - off):.0f} mm/s "
                       f"(config SPEED_LAPS23_MM_S = {config.SPEED_LAPS23_MM_S:.0f})")
         else:
