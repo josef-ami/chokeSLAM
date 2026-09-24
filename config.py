@@ -216,14 +216,17 @@ OUTLINE_FRONT_MM = 197.3
 OUTLINE_REAR_MM = 86.2               # wing trailing edge
 OUTLINE_HALF_WIDTH_MM = 87.0         # wing span 174 mm
 OUTLINE_LENGTH_MM = OUTLINE_FRONT_MM + OUTLINE_REAR_MM   # 283.5 -> parking lot 1.5 x = 425 mm
-# STEERING LOCK -- PLACEHOLDER (decision #78). NOT in the CAD (a static model has
-# no lock). Converted from the report's measured outer-body turning radii
-# (270 mm left, 249.9 mm right) with THIS car's footprint (outer front corner
-# 197.3 ahead, 57.2 out): rear-axle radius = sqrt(R_ob^2 - 197.3^2) - 57.2
-# -> 127.4 mm left / 96.4 mm right -> lock = atan(135.9 / R) = 46.8 / 54.6 deg.
-# MEASURE ON THE ROBOT (full-lock circle diameter each way) and replace.
-STEER_LOCK_LEFT_DEG = 46.8           # PLACEHOLDER
-STEER_LOCK_RIGHT_DEG = 54.6          # PLACEHOLDER
+# STEERING LOCK (checkpoint F, replaces the #78 placeholder). The owner's
+# measured full-lock turning radii (OpenRound.cpp: left 27 cm, right 25 cm),
+# "measured from the outer wheel to the centre of the circle the car traces at
+# full lock". Taken as the OUTER FRONT wheel (the usual turning-circle
+# convention), at WHEELBASE_MM ahead of the rear axle and TRACK_MM / 2 out:
+#   rear-axle radius R = sqrt(R_w^2 - 135.9^2) - 50.5 -> 182.8 mm left / 159.3 mm right
+#   lock = atan(135.9 / R) = 36.6 / 40.5 deg (bicycle-equivalent road-wheel angle)
+# If the radii were to the outer REAR wheel instead: R = R_w - 50.5 -> 219.5 /
+# 199.5 mm -> 31.8 / 34.3 deg. Must match firmware/drive_bridge/drive_protocol.h.
+STEER_LOCK_LEFT_DEG = 36.6
+STEER_LOCK_RIGHT_DEG = 40.5
 # Servo mapping for the drive firmware (v7's values: straight 76.5, left stop 20,
 # right stop 140 servo degrees; below straight steers LEFT). Road-wheel angle is
 # taken as linear in servo angle between straight and each stop -- a PLACEHOLDER
@@ -276,6 +279,14 @@ PP_LOOKAHEAD_S = 0.30                # lookahead = speed x this ...
 PP_LOOKAHEAD_MIN_MM = 110.0          # ... clamped to this range
 PP_LOOKAHEAD_MAX_MM = 260.0
 DRIVE_HZ = 50.0                      # DRIVE frames per second to the STM32
+# Run control (checkpoint F, run_control.py): between runs the Pi re-initialises
+# whenever the car has come to rest, and tells the STM32 it is ready.
+START_STILL_WINDOW_S = 1.0           # at rest = over this long ...
+START_STILL_ENC_TICKS = 3            # ... the encoder moved at most this (2 mm) ...
+START_STILL_YAW_DEG = 0.3            # ... and the yaw at most this
+START_SCAN_MARGIN_S = 0.1            # use LIDAR returns measured this long after the rest began
+START_MIN_RETURNS = 300              # fewer fresh returns: wait for more
+START_RETRY_S = 0.5                  # a failed initialisation is retried this often while at rest
 # Steering law: "rwf" = rear-wheel feedback (curvature feed-forward + lateral and
 # heading error feedback), "pp" = pure pursuit. See follower.py.
 FOLLOWER_MODE = "rwf"

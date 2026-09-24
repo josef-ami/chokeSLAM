@@ -26,13 +26,18 @@ rate is ignored by CDC). Agreed format (decisions #13, #17, #18):
     Status line (checkpoint E, decision #77): the drive firmware also sends,
     at about 20 Hz,
 
-        $STA,<seq_ack>,<status>
+        $STA,<seq_ack>,<status>[,<run_state>,<run_id>,<pwm>,<speed_mmps>]
 
-    seq_ack  the seq byte of the last valid DRIVE frame it accepted (0-255)
-    status   bit flags as in stm_link.py: 0 ENABLED, 1 WATCHDOG (it cut the
-             motor: no valid DRIVE frame for 250 ms), 2 BUTTON (start button
-             pressed since boot), 4 IMU_OK
-    It is kept as status()["sta"] and never counted as bad.
+    seq_ack    the seq byte of the last valid DRIVE frame it accepted (0-255)
+    status     bit flags as in stm_link.py: 0 ENABLED, 1 WATCHDOG (it cut the
+               motor: no valid DRIVE frame for 250 ms), 2 BUTTON (held down
+               now), 3 CLOSED_LOOP, 4 IMU_OK
+    run_state  (checkpoint F) 0 READY, 1 RUNNING, 2 STOPPED, 3 FINISHED: the
+               firmware owns the run (the start button, drive_protocol.h)
+    run_id     runs started since the STM32 booted
+    pwm        motor PWM applied, -255..255;  speed_mmps  its encoder speed
+    It is kept as status()["sta"] and never counted as bad. The short form
+    (the checkpoint-E firmware) reads as run_state/run_id/pwm/speed None.
 
     Writing (checkpoint E): the drive side (drive_link.py) sends its binary
     DRIVE frames through write() on the same port, which this link owns.
@@ -110,7 +115,7 @@ class LinkStats:
     lines_log: int = 0           # '#' / '!' firmware lines skipped (#52)
     recent_log: deque = field(default_factory=lambda: deque(maxlen=LOG_KEEP))
     last_sample: ImuSample | None = None
-    sta: tuple | None = None     # (seq_ack, status bits, rx_time) of the last $STA line
+    sta: tuple | None = None     # (seq_ack, status, rx_time, run_state, run_id, pwm, speed) of the last $STA
     rate_hz: float = 0.0         # measured over the last ~1 s of arrivals
     _arrivals: deque = field(default_factory=lambda: deque(maxlen=200))
 
@@ -235,7 +240,9 @@ class Stm32Link:
             "last_age_s": age,
             "stale": age is None or age > config.IMU_STALE_S,
             "sta": None if s.sta is None else {"seq_ack": s.sta[0], "status": s.sta[1],
-                                               "age_s": round(time.monotonic() - s.sta[2], 3)},
+                                               "age_s": round(time.monotonic() - s.sta[2], 3),
+                                               "run_state": s.sta[3], "run_id": s.sta[4],
+                                               "pwm": s.sta[5], "speed_mm_s": s.sta[6]},
             "last": None if last is None else {"seq": last.seq, "t_ms": last.t_ms,
                                                 "enc": last.enc, "yaw_deg": last.yaw_deg},
         }
@@ -274,7 +281,8 @@ class Stm32Link:
                     if line.strip().startswith(STA_PREFIX):
                         parts = line.strip().split(",")
                         try:
-                            self.stats.sta = (int(parts[1]), int(parts[2]), now)
+                            ext = [int(v) for v in parts[3:7]] if len(parts) >= 7 else [None] * 4
+                            self.stats.sta = (int(parts[1]), int(parts[2]), now, *ext)
                             first = False
                             continue
                         except (IndexError, ValueError):

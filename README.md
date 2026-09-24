@@ -7,7 +7,7 @@ chokeSLAM is the software of our self-driving car for the **WRO 2026 Future Engi
 - **Laps 2 and 3:** it plans one optimised path from the map built on lap 1 and follows it twice.
 
 - **Running it on the car:** [docs/RUNNING_ON_THE_ROBOT.md](docs/RUNNING_ON_THE_ROBOT.md), step by step (firmware, Pi setup, calibration, competition start).
-- **Design, every decision and the evidence for it:** [docs/CHANGES.md](docs/CHANGES.md) (checkpoints A–E).
+- **Design, every decision and the evidence for it:** [docs/CHANGES.md](docs/CHANGES.md) (checkpoints A–F).
 
 ![Two simulated rounds](docs/checkpoint_e_runs.png)
 
@@ -47,6 +47,7 @@ chokeSLAM is the software of our self-driving car for the **WRO 2026 Future Engi
 - **Lap 1.** At each corner the car stops briefly while the LIDAR and camera decide the next lane, plans that lane, and drives it. It re-plans whenever a seat or a colour changes, stops to look again at a pillar whose colour is unknown, and backs up if no forward path exists.
 - **Laps 2–3.** One final map, one closed lap path followed twice, then a stop inside the start section.
 - **Driving.** The Pi closes the loop: a rear-wheel-feedback controller follows the path using the tracker's pose. It sends a steering angle and a speed to the STM32 50 times a second. The STM32 drives the servo and the motor's speed loop, and stops the motor if the Pi goes quiet for 250 ms.
+- **The run (checkpoint F).** The STM32 owns the start button: a press starts a run, a press during a run stops it, and a press after a run has stopped or finished starts a new one. Between runs the Pi re-initialises whenever the car stands still, and the STM32's LED shows when a press will start.
 
 ## 2. Hardware and how the software uses it
 
@@ -57,27 +58,29 @@ Component names are those in the CAD assembly (`ASMB.step`). Geometry was measur
 | Raspberry Pi 5 | – | `run_mission.py` and everything in §3 | localization, planning, path following |
 | RPLIDAR C1, mounted upside down, 134.6 mm ahead of the rear axle | Pi, USB serial | `lidar_source.py` | start scan, seat checks |
 | OV5647 fisheye camera, 139.9 mm ahead, 127 mm high | Pi, CSI (Picamera2) | `camera_source.py`, `color_id.py` | pillar colour (red / green) |
-| STM32F411 "Black Pill" | Pi, native USB (CDC) | `firmware/drive_bridge/` ↔ `stm32_link.py`, `drive_link.py` | sensor stream, steering and motor execution, watchdog, start button |
+| STM32F411 "Black Pill" | Pi, native USB (CDC) | `firmware/drive_bridge/` ↔ `stm32_link.py`, `drive_link.py`, `run_control.py` | sensor stream, steering and motor speed loop, watchdog, the run (start button), status LED (PC13) |
 | BNO08x IMU (Game Rotation Vector), SPI1 | STM32 | `$IMU` line → `lane_tracker.py` | heading |
 | GA25-370 gear motor with hall encoder (TIM5, PA0/PA1) | STM32 via BTS7960 H-bridge (PA2 / PA3) | `$IMU` line (distance), DRIVE frames (speed) | drive and odometry (14.853 ticks/cm) |
-| JX PS-1171MG steering servo (PA8, 500–2500 µs) | STM32 | DRIVE frames (road-wheel angle) | Ackermann steering, wheelbase 135.9 mm |
-| Start button (PB12 to GND) | STM32 | `$STA` status line → `run_mission.py` | the one start button (rule 9.11) |
+| JX PS-1171MG steering servo (PA8, 500–2500 µs; straight 76.5°, stops 20° / 140°) | STM32 | DRIVE frames (road-wheel angle) | Ackermann steering, wheelbase 135.9 mm; full-lock radius 27 cm left / 25 cm right at the outer wheel |
+| Start button (PB12 to GND) | STM32 | run state in `$STA` → `run_control.py` | the one start button (rule 9.11): start / stop / restart |
 | XL4016 buck converter, battery | – | – | power |
 
-The CAD model also contains VL53L0X distance sensors, a TCS34725 colour sensor and an SSD1306 display. chokeSLAM does not use them.
+The pinout is the owner's `OpenRound.cpp`. The CAD model also contains VL53L0X distance sensors, a TCS34725 floor colour sensor (with a TCA9548A and LED2 / LED3) and an SSD1306 display. chokeSLAM does not use them.
 
 ### Pi ↔ STM32 link
 - **STM32 → Pi**, text lines over USB:
   - `$IMU,<seq>,<t_ms>,<enc>,<yaw>` at 100 Hz: raw yaw and the cumulative encoder count.
-  - `$STA,<seq_ack>,<status>` at 20 Hz: enabled, watchdog, button and IMU-ok bits.
-- **Pi → STM32**, binary 11-byte DRIVE frames (the spec in `stm_link.py`): sync, sequence, flags, road-wheel angle (+ = left), speed in mm/s, and an XOR checksum. A STOP frame stops the car.
+  - `$STA,<seq_ack>,<status>,<run_state>,<run_id>,<pwm>,<speed_mmps>` at 20 Hz: status bits (enabled, watchdog, button, closed loop, IMU ok), the run (READY / RUNNING / STOPPED / FINISHED and a counter), and the motor PWM and measured speed.
+  - `#` log lines when the run state changes.
+- **Pi → STM32**, binary 11-byte DRIVE frames (the spec in `stm_link.py`): sync, sequence, flags, road-wheel angle (+ = left), speed in mm/s, and an XOR checksum. A STOP frame stops the car. Two flag bits the spec leaves free carry PI_READY (a press may start a run) and RUN_OVER (the Pi's run has ended).
 
 ## 3. Code modules
 
 ### Runs on the robot
 | File | What it does |
 |---|---|
-| `run_mission.py` | **The competition program.** STM32 link, LIDAR start scan, initialisation, then waits for the start button, then runs the mission at 50 Hz; sends STOP on every exit |
+| `run_mission.py` | **The competition program.** Opens the STM32 link, LIDAR and camera and runs `run_control` at 50 Hz until stopped; sends STOP on exit |
+| `run_control.py` | Start / stop / restart: re-initialises whenever the car stands still, reports ready, runs the mission while the STM32 says RUNNING, ends a run that finished |
 | `mission.py` | Mission state machine: look, plan, drive, reverse, laps 2–3, finish |
 | `vg_planner.py` | Visibility-graph planner: tangent arcs, arc-fit corners, lap checkpoints, footprint check |
 | `field_map.py` | The planner's world in the loop frame: pillars, pass-side lines, island, parking lot; tracker pose → loop frame |
@@ -95,13 +98,14 @@ The CAD model also contains VL53L0X distance sensors, a TCS34725 colour sensor a
 ### Firmware (`firmware/`)
 | Folder | What it is |
 |---|---|
-| `drive_bridge/` | **The firmware for `run_mission.py`**: `$IMU` / `$STA` stream, DRIVE execution, servo map, speed loop, watchdog, start button. `drive_protocol.h` is the hardware-free part (host-tested) |
+| `drive_bridge/` | **The firmware for `run_mission.py`** (Arduino IDE): `$IMU` / `$STA` stream, the run and the start button, DRIVE execution, servo map, speed loop, watchdog. `drive_protocol.h` is the hardware-free part (host-tested) |
 | `stm32_imu_bridge/` | Sensor stream only (motor off): for tracking tests by hand |
 | `obstacle_round_stream/`, `chokeslam_stream/` | The earlier v7 firmware with the stream added, and the stream as a portable header (reference) |
 
 ### Tools
 | File | What it does |
 |---|---|
+| `drive_calibrate.py` | Measures the motor: fits the speed loop's feed-forward from open-loop runs, checks the closed loop |
 | `run_init.py` | Initialisation from the real LIDAR, a saved scan or the simulator, with every intermediate number |
 | `run_track.py` | `--bench`: STM32 calibration check; `--real`: initialisation + tracking; `--replay-scan/--replay-imu`: replay a recorded run |
 | `measure_lidar_delay.py` | Measures the LIDAR vs STM32 time offset on the robot |
@@ -144,7 +148,9 @@ Every module has a test suite (`test_*.py`); run each with `python3 test_<name>.
 - simulated LIDAR, STM32 and camera;
 - a judge applying the rulebook: contact, wrong side, laps, finish, 3 minutes.
 
-`sweep_closed_loop.py` runs hundreds of these in parallel. Results on 200 layouts (CHANGES §16.11); success is counted over runs that pass initialisation:
+`test_run_control.py` runs start / stop / restart end to end: the firmware's run logic compiled from `drive_protocol.h`, in lockstep with the real Pi side on a simulated car.
+
+`sweep_closed_loop.py` runs hundreds of these in parallel. Results on 200 layouts with the checkpoint-E placeholder steering lock (CHANGES §16.11); success is counted over runs that pass initialisation. **With the measured lock, success without noise drops from 100 % to 49 %** (§6 below):
 
 | Noise | Success |
 |---|---|
@@ -155,7 +161,8 @@ Every module has a test suite (`test_*.py`); run each with `python3 test_<name>.
 
 ## 6. Status and known limits
 
-- **Not yet run on the car.** The drive firmware has not been compiled or run. The steering lock, servo map and speed-loop gains are placeholders to measure ([docs/RUNNING_ON_THE_ROBOT.md](docs/RUNNING_ON_THE_ROBOT.md) §5).
+- **Not yet run on the car.** The drive firmware has been compiled only on a PC against stand-in headers, never with the STM32 toolchain or on the STM32. The speed-loop values are placeholders to measure (`drive_calibrate.py`, [docs/RUNNING_ON_THE_ROBOT.md](docs/RUNNING_ON_THE_ROBOT.md) §5).
+- **The measured turning radius breaks many plans (decision pending).** With the lock from the measured radii (36.6° left, 40.5° right), 49 % of initialised simulated starts succeed without noise, compared with 100 % with the old placeholder. Mostly the planner loops round where a left corner is too tight, and `test_vg_planner.py`'s full-lap check fails. The options are in CHANGES §17.5.
 - **Initialisation refuses about 17 % of rulebook starts**, mostly CW starts where a pillar on the middle inner seat hides the opening past the island.
 - **About 3 % of starts have no path.** The car stands about 300 mm behind a pillar that must be passed on the far side.
 - **Heavy noise needs a pose correction during the laps.** Nothing corrects the pose after initialisation; that is by design so far.

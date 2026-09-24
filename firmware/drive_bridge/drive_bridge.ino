@@ -1,38 +1,50 @@
 // ============================================================
-// chokeSLAM DRIVE BRIDGE  -  STM32F411CEU6 "Black Pill"   (checkpoint E, #77)
+// chokeSLAM DRIVE BRIDGE  -  STM32F411CEU6 "Black Pill"   (checkpoint E #77, F)
 //
-// The obstacle-round firmware for the Pi-driven car. The Pi plans and closes
-// the path loop; this sketch only EXECUTES and REPORTS:
+// The obstacle-round firmware for the Pi-driven car. The Pi localizes, plans
+// and closes the path loop; this sketch EXECUTES, REPORTS and owns the RUN:
 //
-//   STM32 -> Pi   $IMU,<seq>,<t_ms>,<enc>,<yaw>\n   100 Hz  (unchanged, section 9.1)
-//                 $STA,<seq_ack>,<status>\n         20 Hz   (status bits, drive_protocol.h)
-//   Pi -> STM32   11-byte DRIVE frames (the owner's stm_link.py spec), ~50 Hz
+//   STM32 -> Pi   $IMU,<seq>,<t_ms>,<enc>,<yaw>\n     100 Hz  (section 9.1)
+//                 $STA,<seq_ack>,<status>,<run_state>,<run_id>,<pwm>,<speed>\n  20 Hz
+//                 # log lines on run-state changes only (OpenRound style)
+//   Pi -> STM32   11-byte DRIVE frames (the owner's stm_link.py spec + the
+//                 PI_READY / RUN_OVER flag bits, drive_protocol.h), 50 Hz
 //
-//   DIRECT        servo = the road-wheel angle the Pi names (+ = LEFT), mapped
-//                 to servo degrees (drive_protocol.h SteerMap -- PLACEHOLDER linear
-//                 map until the wheel angle is measured at both stops)
-//                 motor = speed loop on the encoder (CLOSED_LOOP flag) or feed-forward only
-//   STOP          motor off, servo straight
-//   HEADING_HOLD  not used by the Pi; treated as STOP
-//   WATCHDOG      no valid DRIVE frame for 250 ms -> motor off, servo straight,
-//                 status bit WATCHDOG, until frames come back
-//   BUTTON        PB12 to GND (pull-up), latched on the first press, reported in
-//                 $STA; the Pi starts the round on it (the one start button, 9.11)
+// BUTTON (PB12), the owner's rule:
+//   ready, stopped or finished -> press: a run STARTS (only while the Pi says
+//                                 it is ready: initialised, car standing still)
+//   running                    -> press: the run STOPS (motor off at once)
+//   the Pi ends a run itself (finished / failed) with RUN_OVER -> finished
+//   OpenRound's debounce: 30 ms, 400 ms lockout, released-first at power-up.
 //
-// Everything not in drive_protocol.h is the approved IMU bridge (#47-#51):
-// same pins, encoder, IMU, $IMU formatting, status LED.
+//   DIRECT (running)  servo = the road-wheel angle the Pi names (+ = LEFT),
+//                     mapped to servo degrees (SteerMap); motor = speed loop on
+//                     the encoder (SpeedPI, CLOSED_LOOP flag)
+//   anything else     motor off, servo straight
+//   WATCHDOG          no valid DRIVE frame for 250 ms -> motor off, servo
+//                     straight, status bit WATCHDOG, until frames come back
 //
-// PINOUT
-//   encoder PA0/PA1 (TIM5), IMU BNO08x SPI1 (PA5/6/7, CS PA4, INT PB0, RST PB1),
-//   motor PA2 fwd / PA3 rev (BTS7960), servo PA8 (500-2500 us), button PB12,
-//   LED PC13 (active LOW)
+// PINOUT (OpenRound.cpp, bench-verified by the owner)
+//   motor    PA2 forward (TIM2_CH3) / PA3 reverse, BTS7960
+//   encoder  TIM5 PA0/PA1, negated so forward counts up, 14.853 ticks/cm
+//   IMU      BNO08x SPI1 (MOSI PA7, MISO PA6, SCK PA5), CS PA4, INT PB0, RST PB1
+//   servo    PA8, 500-2500 us, straight 76.5, left stop 20, right stop 140
+//   button   PB12 to GND (internal pull-up)
+//   LED      PC13 (active LOW)
+//   Not used: the TCS34725 floor colour sensor, TCA9548A (I2C PB6/PB7, PB8)
+//   and LED2/LED3 (PB13/PB14) -- left untouched.
 //
 // STATUS LED (PC13)
-//   solid      frames arriving, motor enabled
-//   slow       streaming, no DRIVE frames (waiting for the Pi)
-//   fast       IMU fault
+//   fast blink 100 ms   IMU fault (no run can start)
+//   blink 1 s           no DRIVE frames (Pi program not running)
+//   blink 250 ms        Pi connected but not ready (initialising, car moving,
+//                       or initialisation failed: place the car again)
+//   solid               ready -- a press starts a run; also while running
 //
-// NOT COMPILED HERE (no STM32duino toolchain in the sandbox, as for section 14.4);
+// Arduino IDE: STM32duino core, board "Generic STM32F4 series" -> BlackPill
+// F411CE, USB support "CDC (generic 'Serial' supersede U(S)ART)", libraries
+// SparkFun BNO08x Cortex Based IMU + Servo. Keep drive_protocol.h next to
+// this file. NOT COMPILED HERE (no STM32duino toolchain in the sandbox);
 // drive_protocol.h is host-tested by test_drive_firmware.py.
 // ============================================================
 #include <Arduino.h>
@@ -59,24 +71,25 @@ const uint32_t STA_PERIOD_MS = 50;             // $STA 20 Hz
 const uint16_t IMU_REPORT_MS = 10;
 const uint32_t IMU_STALE_MS  = 100;
 
-SPIClass SPI_IMU(PA7, PA6, PA5);
+SPIClass SPI_IMU(PA7, PA6, PA5);               // MOSI, MISO, SCLK
 Servo    steeringServo;
 BNO08x   imu;
 
-drive::Parser   parser;
-drive::Command  cmd;
-drive::SteerMap steerMap;
-drive::SpeedPI  speedPI;
+drive::Parser         parser;
+drive::Command        cmd;
+drive::SteerMap       steerMap;
+drive::SpeedPI        speedPI;
+drive::SpeedEstimator speedEst;
+drive::Button         button;
+drive::Run            run;
 bool     haveCmd = false;
 uint32_t lastCmdMs = 0;
-bool     buttonLatched = false;
-uint8_t  btnCount = 0;
 
 bool     imuFound = false, haveYaw = false;
 float    lastYawDeg = 0.0f;
 uint32_t lastYawMs = 0, seq = 0, nextMs = 0, nextStaMs = 0;
-int32_t  lastEnc = 0;
-float    speedMeas = 0.0f;                      // mm/s, filtered
+float    speedMeas = 0.0f;                     // mm/s
+int      pwmOut = 0;
 uint8_t  statusBits = 0;
 
 void initEncoder() {
@@ -117,6 +130,12 @@ void sendLine(const char *line, int n) {
   if (n > 0 && Serial && Serial.availableForWrite() >= n) Serial.write((const uint8_t *)line, n);
 }
 
+void logLine(const char *msg) {                // '#' lines: counted as log by stm32_link.py
+  char line[64];
+  int n = snprintf(line, sizeof(line), "# %s run %lu\n", msg, (unsigned long)run.runId);
+  if (n < (int)sizeof(line)) sendLine(line, n);
+}
+
 void sendImu() {
   uint32_t t_ms = HAL_GetTick();
   int32_t enc = readEncoder();
@@ -131,29 +150,44 @@ void sendImu() {
 }
 
 void setMotor(int pwm) {
+  pwmOut = pwm;
   if (pwm > 0)      { analogWrite(MOT_RPWM_PIN, pwm); analogWrite(MOT_LPWM_PIN, 0); }
   else if (pwm < 0) { analogWrite(MOT_RPWM_PIN, 0);   analogWrite(MOT_LPWM_PIN, -pwm); }
   else              { analogWrite(MOT_RPWM_PIN, 0);   analogWrite(MOT_LPWM_PIN, 0); }
 }
 
 void setServo(float deg) {
+  if (deg < steerMap.leftStop) deg = steerMap.leftStop;
+  if (deg > steerMap.rightStop) deg = steerMap.rightStop;
   int pulse = (int)((deg / 180.0f) * (SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US)) + SERVO_MIN_PULSE_US;
   steeringServo.writeMicroseconds(pulse);
 }
 
+bool piReady() { return haveCmd && millis() - lastCmdMs <= drive::WATCHDOG_MS && cmd.piReady && imuHealthy(); }
+
 void readPi() {
   while (Serial.available() > 0) {
     drive::Command c;
-    if (parser.feed((uint8_t)Serial.read(), c)) { cmd = c; haveCmd = true; lastCmdMs = millis(); }
+    if (parser.feed((uint8_t)Serial.read(), c)) {
+      cmd = c; haveCmd = true; lastCmdMs = millis();
+      if (run.frame(c) == drive::EV_FINISH) logLine("FINISHED (Pi)");
+    }
+  }
+}
+
+void updateButton() {
+  if (!button.update(digitalRead(BTN_PIN) == HIGH, millis())) return;
+  switch (run.press(piReady())) {
+    case drive::EV_START:   logLine("START (button)"); break;
+    case drive::EV_STOP:    setMotor(0); setServo(steerMap.straight); logLine("STOPPED (button)"); break;
+    case drive::EV_IGNORED: logLine("press ignored: Pi not ready"); break;
+    default: break;
   }
 }
 
 void control(float dt) {
-  int32_t e = readEncoder();
-  float v = (e - lastEnc) / TICKS_PER_MM / dt;
-  lastEnc = e;
-  speedMeas += 0.3f * (v - speedMeas);
-  drive::Output o = drive::decide(cmd, haveCmd, millis() - lastCmdMs);
+  speedMeas = speedEst.update(readEncoder(), TICKS_PER_MM, dt);
+  drive::Output o = drive::decide(cmd, haveCmd, millis() - lastCmdMs, run.state == drive::RUNNING);
   if (o.motorOn) {
     setServo(steerMap.servoFor(o.wheelDeg));
     setMotor(speedPI.step(o.speedMmps, speedMeas, dt, o.closedLoop));
@@ -163,20 +197,18 @@ void control(float dt) {
     setMotor(0);
   }
   statusBits = (o.motorOn ? drive::ST_ENABLED : 0) | (o.watchdog ? drive::ST_WATCHDOG : 0) |
-               (buttonLatched ? drive::ST_BUTTON : 0) | (imuHealthy() ? drive::ST_IMU_OK : 0);
-}
-
-void updateButton() {
-  if (digitalRead(BTN_PIN) == LOW) { if (btnCount < 5 && ++btnCount == 5) buttonLatched = true; }
-  else btnCount = 0;
+               (button.held() ? drive::ST_BUTTON : 0) | (o.motorOn && o.closedLoop ? drive::ST_CLOSED_LOOP : 0) |
+               (imuHealthy() ? drive::ST_IMU_OK : 0);
 }
 
 void updateLed() {
   uint32_t now = millis();
+  bool fresh = haveCmd && now - lastCmdMs <= drive::WATCHDOG_MS;
   bool on;
-  if (!imuHealthy())                       on = (now / 100) & 1;
-  else if (!(statusBits & drive::ST_ENABLED)) on = (now / 500) & 1;
-  else                                     on = true;
+  if (!imuHealthy())                                       on = (now / 100) & 1;
+  else if (!fresh)                                         on = (now / 1000) & 1;
+  else if (run.state == drive::RUNNING || piReady())       on = true;
+  else                                                     on = (now / 250) & 1;
   digitalWrite(STATUS_LED_PIN, on ? LOW : HIGH);
 }
 
@@ -208,8 +240,9 @@ void loop() {
   }
   if ((int32_t)(now - nextStaMs) >= 0) {
     nextStaMs += STA_PERIOD_MS;
-    char line[32];
-    sendLine(line, drive::formatStatus(line, sizeof(line), cmd.seq, statusBits));
+    char line[64];
+    sendLine(line, drive::formatStatus(line, sizeof(line), cmd.seq, statusBits, run.state, run.runId,
+                                       pwmOut, speedMeas));
   }
   updateLed();
 }

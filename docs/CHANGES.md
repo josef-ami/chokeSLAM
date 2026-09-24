@@ -1864,3 +1864,145 @@ python3 run_mission.py                     # on the robot (drive_bridge firmware
 - **New:** `field_map.py`, `vg_planner.py`, `follower.py`, `mission.py`, `drive_link.py`, `run_mission.py`, `layouts.py`, `sim_closed_loop.py`, `sweep_closed_loop.py`, `test_vg_planner.py`, `test_drive_firmware.py`, `firmware/drive_bridge/drive_bridge.ino`, `firmware/drive_bridge/drive_protocol.h`, `docs/checkpoint_e_runs.png`; the owner's `path_planner.py` and `stm_link.py`, unchanged.
 - **Changed:** `config.py` (CAD geometry and lever arms, planner / mission / follower keys, proposals), `lane_tracker.py` (§16.8), `lane_init.py` (P2, on: #85), `stm32_link.py` (`$STA`, `write`), `simulation.py` (`sensor_pose`, lever arm in the mock casting), the test files of E-A8, `README.md` (banner).
 
+
+## 17. Checkpoint F: the drive firmware and the start button
+
+The owner asked for the STM32F411CE Black Pill firmware that runs chokeSLAM, with `OpenRound.cpp` as the reference for the pinout ("more accurate" than `ObstacleLap.cpp`), and answered the open questions (24 Sept).
+
+### 17.1 Decision log (checkpoint F)
+
+| # | Question | Owner's answer / what was done |
+|---|---|---|
+| 88 | Pinout | OpenRound.cpp: motor PA2 fwd / PA3 rev (BTS7960), encoder TIM5 PA0/PA1 (negated, 14.853 ticks/cm), BNO08x SPI1 PA7/PA6/PA5, CS PA4, INT PB0, RST PB1, servo PA8 500–2500 µs (straight 76.5, left stop 20, right stop 140), button PB12 to GND, LED PC13 active LOW. Identical to the checkpoint-E sketch; `test_drive_firmware.py` checks the sketch's pin table |
+| 89 | Turning radius at full lock (left 27 cm, right 25 cm) | "measured from the outer wheel to the centre of the circle traced out by the bot when it is turning at the maximum steering angle". Read as the **outer front wheel** (§17.2) |
+| 90 | Speed control | "you decide": a closed speed loop on the encoder, with feed-forward (§17.3), and `drive_calibrate.py` to measure the motor |
+| 91 | Button | "button starts a run. If pressed during a run, the run is stopped. If pressed when the run has stopped or is finished, the run restarts" (§17.4) |
+| 92 | Floor colour sensor and LED2 / LED3 | not used: not initialised, pins left alone |
+| 93 | Build | Arduino IDE (STM32duino core) |
+| 94 | Folder | "you decide": `firmware/drive_bridge/`, updated in place (the docs and tools already point there) |
+
+### 17.2 Steering lock from the measured radii (#89)
+
+The rear-axle midpoint turns on a circle of radius R about a centre on the rear-axle line. The outer front wheel is WHEELBASE_MM (135.9) ahead and TRACK_MM / 2 (50.5) further out, so its radius is R_w = sqrt((R + 50.5)² + 135.9²):
+
+| | R_w (measured) | R (rear axle) | lock = atan(135.9 / R) | before (placeholder #78) |
+|---|---|---|---|---|
+| left | 270 mm | 182.8 mm | **36.6°** | 46.8° (R 127.4) |
+| right | 250 mm | 159.3 mm | **40.5°** | 54.6° (R 96.4) |
+
+If the radii were measured to the outer **rear** wheel instead, R = R_w − 50.5 = 219.5 / 199.5 mm, lock 31.8° / 34.3°. **To confirm with the owner.** The values are in `config.py` (`STEER_LOCK_*`) and `drive_protocol.h` (`SteerMap`); the firmware test fails if they differ.
+
+### 17.3 The firmware (`firmware/drive_bridge/`)
+
+- `drive_bridge.ino` wires the hardware; `drive_protocol.h` holds everything that can be tested without it (parser, button, run states, steering map, speed estimate and loop, `$STA` format).
+- **Speed:**
+  - The measured speed is the encoder over the last 50 ms (one tick is 67 mm/s over a single 10 ms period).
+  - PWM = `kff × v + offset` (feed-forward), plus PI when the frame's CLOSED_LOOP flag is set, which the Pi always sets.
+  - The integrator resets on a zero target or a change of direction, and does not wind up into the PWM limit.
+  - The output never drives against the requested direction.
+  - `kff` 0.20 PWM per mm/s, `offset` 25, `kp` 0.10 and `ki` 0.50 are **placeholders**, because no speed / PWM pair of this motor exists. OpenRound drives at a constant PWM of 70 on straights.
+  - `drive_calibrate.py` fits `kff` and `offset` from open-loop runs, and reports the closed-loop step response.
+- **Steering:** linear from straight to each stop, at the lock angles of §17.2.
+- **`$STA`** gains four fields: `$STA,<seq_ack>,<status>,<run_state>,<run_id>,<pwm>,<speed_mmps>`.
+  - The status bits are stm_link.py's: ENABLED, WATCHDOG, BUTTON, CLOSED_LOOP, IMU_OK. BUTTON now means "held down now" instead of "pressed since boot".
+  - `stm32_link.py` reads both the long and the short form.
+- **DRIVE frame:** two flag bits that the owner's spec leaves unused.
+  - Bit 4 **PI_READY:** the Pi holds a valid initialisation.
+  - Bit 5 **RUN_OVER:** the Pi's run has ended.
+  - `stm_link.py` is unchanged; `drive_link.encode` sets the bits and recomputes the checksum.
+- **Log lines:** `#` lines on run-state changes only, in OpenRound's style. `stm32_link` counts them as log lines.
+- **Status LED:**
+
+  | Pattern | Meaning |
+  |---|---|
+  | 100 ms blink | IMU fault |
+  | 1 s blink | no DRIVE frames |
+  | 250 ms blink | Pi connected, not ready |
+  | solid | ready, or running |
+- **Unchanged from checkpoint E:** the IMU (Game Rotation Vector at 10 ms), the `$IMU` line and the 250 ms watchdog.
+
+### 17.4 The run: start, stop, restart (#91)
+
+The **firmware owns the run**, so a press stops the car even if the Pi misbehaves.
+
+| State | Event | Result |
+|---|---|---|
+| READY / STOPPED / FINISHED | press, and the Pi is ready | **RUNNING**, `run_id + 1` |
+| READY / STOPPED / FINISHED | press, the Pi is not ready | ignored (`# press ignored`) |
+| RUNNING | press | **STOPPED**: motor off in that control period, whatever the frames say |
+| RUNNING | a frame with RUN_OVER | **FINISHED** |
+
+- "The Pi is ready" means a frame no older than 250 ms carrying PI_READY, and a healthy IMU.
+- The motor runs only in RUNNING, and only on fresh DIRECT frames.
+- The button uses OpenRound's debounce: a level must hold 30 ms, a press within 400 ms of the last one is ignored, and a button held at power-up must be released before a press counts.
+
+**The Pi side** is `run_control.RunSupervisor`, called by `run_mission.py` at 50 Hz. `run_mission.py` now runs until it is stopped, and every run starts from nothing.
+
+- **Between runs:**
+  - The car is at rest when, over 1 s, the encoder moved ≤ 3 ticks and the yaw ≤ 0.3°.
+  - At rest, the Pi initialises from the LIDAR returns measured since the rest began. The LIDAR table keeps the last return per degree forever, so older returns are excluded.
+  - It then keeps a lane tracker fed from that moment and sends PI_READY.
+  - Any motion clears PI_READY; the next rest re-initialises. A failed initialisation is retried every 0.5 s.
+  - Picking the car up turns it, so the yaw shows the motion; the wheels need not turn.
+- **Run:** a new `run_id` in RUNNING starts the mission with the tracker held at that moment. When the STM32 leaves RUNNING (a press), the mission ends at once.
+- **End:** when the mission ends by itself (DONE or FAILED), RUN_OVER is sent until the STM32 reports FINISHED.
+- **Program restart:** a program that finds the STM32 already RUNNING (the previous program crashed) ends that run with RUN_OVER.
+- **After a finish** the car becomes ready where it stopped. The team should carry it back to a start zone before pressing.
+- **Removed:** `--no-button`, because runs start only from the button now.
+
+### 17.5 KNOWN ISSUE: the planner with the measured lock
+
+The measured lock is much weaker than the placeholder. Closed-loop sweep, 200 rulebook layouts, no noise, success among the 166 starts that initialise:
+
+| Lock | PLAN_RADIUS_FACTOR | Success |
+|---|---|---|
+| placeholder 46.8 / 54.6 | 1.25 | 166 / 166 (100 %) |
+| **measured 36.6 / 40.5** | **1.25 (current)** | **82 / 166 (49 %)** |
+| measured | 1.1 | 137 / 166 (82.5 %) |
+| measured | 1.0 (no steering margin) | 146 / 166 (88 %) |
+
+At factor 1.25 there are 84 failures:
+- **65 "at the viewing pose but the tracker is in lane N+1", mostly CCW.** The viewing pose sits on the new lane's centre line (VIEW_Y 500). With the 229 mm left planning radius, reaching it needs the turn to start 271 mm from the outer wall. When a pillar must be passed on the inner side, that is impossible, and the cheapest path the planner finds is a 270° loop the other way round. The tracker's turn rule reads that loop as a lane change.
+- **18 "no path".**
+
+`test_vg_planner.py`'s full-lap check now fails: the full-lap plan V0 → V0 on the true map has no path in 39 of 150 layouts (19 of 150 at factor 1.0, all CCW). That test was not relaxed.
+
+Tried and reverted: extra viewing-pose candidates at y 650 / 800. The result was 71 / 166, because the loop to y 500 stays the cheapest path.
+
+**Options, for the owner's decision:**
+- (a) Confirm the radii, and whether they were measured to the front or the rear wheel (§17.2).
+- (b) Lower PLAN_RADIUS_FACTOR. This trades away the follower's steering margin under noise.
+- (c) Planner and mission changes:
+  - reject paths that turn more than about 180° against the round direction;
+  - place the viewing pose where the approach allows, rather than on a fixed y;
+  - choose the laps-2–3 anchor pose per layout.
+- (d) More steering lock mechanically. Left is the limiting side.
+
+The firmware work does not depend on this choice.
+
+### 17.6 Tests
+
+- **`test_drive_firmware.py`**:
+  - `drive_protocol.h` with g++ `-Wall -Wextra -Werror`: frames with the new flags through garbage, a corrupted frame and a split frame; the steering map equal to `config.py`; watchdog; no motor outside RUNNING.
+  - The button script: held at boot, 10 ms bounces, the 400 ms lockout.
+  - The run-state sequence: ignored, start, stop, restart, finish.
+  - The speed loop against a motor model (K 4 mm/s per PWM, offset 20, τ 0.12 s): 200 / 500 / 800 / −200 mm/s within 5 % in 2 s, overshoot under 25 %.
+  - **`drive_bridge.ino` compiled** against stand-in Arduino / HAL / library headers, running `setup()` and `loop()`, and its pin table.
+  - `$STA` in both forms through a pseudo-terminal.
+- **`test_run_control.py`, new:** a virtual STM32 compiled from `drive_protocol.h`, in lockstep with the real supervisor, DriveLink, initialisation, tracker and mission, on a simulated car and rulebook layout. One session:
+  1. READY at rest;
+  2. a press while the car is carried is ignored;
+  3. run 1 is stopped by a press, with the motor off in the same firmware step;
+  4. carried back, it re-initialises;
+  5. run 2 completes the round (23 m, stopped in the start section), then RUN_OVER → FINISHED;
+  6. READY where it finished, run 3 is restarted and stopped;
+  7. a new program ends a stale RUNNING run.
+- **Results:**
+  - All other suites pass, except `test_vg_planner.py` (§17.5).
+  - `test_run_track.py` and `test_dashboard.py` still fail as before (`LIDAR_TIME_OFFSET_S`, §16.13).
+  - Not compiled with the STM32 toolchain: its downloads are blocked in this sandbox.
+
+### 17.7 Files
+
+- **New:** `run_control.py`, `drive_calibrate.py`, `test_run_control.py`.
+- **Changed:** `firmware/drive_bridge/drive_bridge.ino`, `firmware/drive_bridge/drive_protocol.h`, `drive_link.py` (flags, run state), `stm32_link.py` (`$STA` long form), `run_mission.py` (runs until stopped, via `run_control`), `config.py` (`STEER_LOCK_*`, `START_*`), `test_drive_firmware.py`, `docs/RUNNING_ON_THE_ROBOT.md`, `README.md`.
