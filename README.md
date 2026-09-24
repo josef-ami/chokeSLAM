@@ -162,6 +162,8 @@ Every module has a test suite (`test_*.py`); run each with `python3 test_<name>.
 | moderate, encoder calibrated to 0.5 % | 97 % |
 | harsh (2 × moderate) | 45 % |
 
+**With the current lock placeholders** (36.6° / 40.5°, checkpoint F2, CHANGES §18.5), success is lower: 49 % with no noise, 39 % under moderate noise, 49 % with the encoder calibrated, and 74 % under moderate noise with `PLAN_RADIUS_FACTOR` 1.0. There are no wrong seats or colours in any of these; the limit is the planner with a weaker lock (§6).
+
 ## 6. Status and known limits
 
 - **Not yet run on the car.** The drive firmware has been compiled only on a PC against stand-in headers, never with the STM32 toolchain or on the STM32. The speed-loop values are placeholders to measure (`drive_calibrate.py`, [docs/RUNNING_ON_THE_ROBOT.md](docs/RUNNING_ON_THE_ROBOT.md) §6).

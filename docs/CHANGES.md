@@ -2090,7 +2090,28 @@ The owner asked (24 Sept): "keep these lock values as placeholders and mention s
 - **The mission itself still plans on the control loop's thread,** as it has since checkpoint E: during lap-1 re-plans and laps-2–3 re-plans it holds the interpreter for that long. The closed-loop simulation is synchronous and cannot show the effect. **To watch on the robot:** wrong entry verdicts right after a re-plan. The remedy is the same worker process; not done without your approval, because it changes the mission's timing.
 - The page was checked in Chromium (Playwright) in mission-mock mode: no script errors.
 
-### 18.5 Files
+### 18.5 Simulation results at the end of checkpoint F2
+
+Closed-loop sweep, 200 rulebook layouts, one trial each, with the committed defaults: lock placeholders 36.6° / 40.5°, `PLAN_RADIUS_FACTOR` 1.25, P1–P3 on. Success is counted among the starts that initialise.
+
+| Noise | Initialised | Success | Main failures |
+|---|---|---|---|
+| none | 166 / 200 | **82 / 166 (49.4 %)** | 65 planner loops ("tracker in lane N+1"), 18 no path |
+| moderate | 175 / 200 | **69 / 175 (39.4 %)** | 85 mission (loops / no path), 21 contact |
+| moderate, encoder at 0.5 % | 175 / 200 | **85 / 175 (48.6 %)** | 87 mission, 3 contact (wall) |
+| moderate, `PLAN_RADIUS_FACTOR` 1.0 | 175 / 200 | **129 / 175 (73.7 %)** | 33 contact, 13 mission |
+
+In every sweep: 0 wrong seat verdicts and 0 wrong colours.
+- **The no-noise sweep is identical, row for row, to the one before this checkpoint's refactors.**
+- **The limiting factor is the steering lock** (§17.5), not localization or perception.
+- **Factor 1.0 trades loops for contacts:** with less steering margin, the follower grazes pillars under noise.
+
+The owner's decisions still pending:
+- the measured lock (§17.2, RUNNING_ON_THE_ROBOT §6.5);
+- the planner options in §17.5;
+- moving the mission's own planning off the control thread (§18.4).
+
+### 18.6 Files
 
 - **New:** `mission_sim.py`.
 - **Changed:**
