@@ -1776,4 +1776,87 @@ At 50 Hz: the nearest path sample (monotonic search), then the steering law, the
 - **Noise presets** (per trial): `none`; `moderate` (the report's: start ±10 mm / ±2°, encoder scale ±2 %, steering bias 1° + 1° per command, IMU drift 0.5°/min + 0.15° noise, lock ±5 %, speed ±5 %); `moderate_cal` (the same with the encoder calibrated to ±0.5 %); `harsh` (twice moderate).
 - **Judge** (§ docstring of sim_closed_loop): contact of the footprint with a pillar, limitation, the island or the wall; wrong side (the car's centre crossing a pillar's line on the wrong side before lap 3 is complete); laps (the whole outline into the start section, at least 4 m driven since the last); finish (stopped, whole outline in the start section); 180 s.
 
-<!-- RESULTS -->
+### 16.11 Results
+
+Rulebook layouts 0–199 (`layouts.draw(Random(k))`), 1 trial with no noise, 3 with noise (2 for harsh). "Of initialised" leaves out the starts that initialisation refuses. Re-run: `python3 sweep_closed_loop.py --layouts 200 --trials 3 --noise moderate [--set NAME=VALUE ...]`.
+
+| Configuration | Noise | Runs | Initialised | **Success of initialised** | Overall | Failures (of initialised) |
+|---|---|---|---|---|---|---|
+| A: as approved (P1–P3 off) | none | 200 | 99 | **99 / 99 = 100 %** | 49.5 % | – |
+| A | moderate | 600 | 320 | **263 / 320 = 82.2 %** | 43.8 % | wrong side 36 (35 after a colour was given up), contact 20, planner 1 |
+| B: A + P1 + P2 + P3 | none | 200 | 166 | **166 / 166 = 100 %** | 83.0 % | – |
+| B | moderate | 600 | 530 | **463 / 530 = 87.4 %** | 77.2 % | contact 48, planner 18, wrong side 1 |
+| B | moderate, encoder calibrated to 0.5 % | 600 | 530 | **512 / 530 = 96.6 %** | 85.3 % | planner 17, contact 1 |
+| B | harsh (2 × moderate) | 400 | 350 | **156 / 350 = 44.6 %** | 39.0 % | contact 112, wrong side 58, planner 24 |
+| C: B + clearance 40 / inflation 105 mm | moderate | 600 | 530 | **506 / 530 = 95.5 %** | 84.3 % | planner 16, contact 8 |
+| D: B with pure pursuit | moderate | 200 | 175 | **127 / 175 = 72.6 %** | 63.5 % | contact 43, planner 4, wrong side 1 |
+
+Across all runs: **0 wrong seat verdicts and 0 wrong colours** in B / C (4 wrong seats and 1 wrong colour in A-moderate, all from the 84 mm initialisation error that P2 removes). Successful runs take 46–48 s median (max 64 s) of the 180 s. The closest pillar pass is about 30 mm median.
+
+What the numbers say:
+
+1. **Without noise the integration works**: every initialised start, both directions, finishes 3 laps and stops in the start section.
+2. **Initialisation is the largest single loss.** As approved (`GAP_OPEN_MIN_MM` 500), it refuses 101 / 200 rulebook starts (57 % of CCW starts): the rulebook moves the start section's signs to the inner row, and a pillar on the far inner seat hides most of the opening past the island. That never happened in the earlier tests, which placed pillars at random away from the start. P1 (300) refuses 34 / 200 with **0 wrong directions in 600 layouts**. The rest are CW starts with the middle inner seat occupied: the pillar hides the whole opening, and no threshold helps (a different cue is needed; not done).
+3. **Placement yaw.** With yaw 0 at initialisation (#4), y is off by about 15 mm per degree; the moderate preset's occasional 4–6° placement puts the camera's box off the pillar (colour given up → passed as "either" → wrong side) and the LIDAR seat check on the wrong seat. P2 removes this (84.8 → 1.3 mm in the diagnosed case).
+4. **Dead reckoning** is the remaining error: the ±2 % encoder scale error becomes up to about 50 mm at the corners (along-track error of one lane becomes lateral error in the next), against 30 mm of clearance. Calibrating the encoder to 0.5 % (C11: roll a measured 2 m) takes moderate from 87 % to 97 %; 40 mm clearance takes it to 95 %. Harsh noise (2 × moderate) is not survivable without a pose correction during the laps.
+5. **The follower matters**: rear-wheel feedback 87 % vs pure pursuit 73 % under the same noise (pure pursuit cuts every arc).
+6. **Remaining planner failures (≈ 3 %)** are all at the start: the car stands about 300 mm behind the start section's far inner pillar, which must be passed on the island side, and even after backing up (E-A4) no path exists within the 30 mm clearance. A longer reverse or a first leg planned with less clearance would address it.
+
+### 16.12 Awaiting approval
+
+**Proposals that change approved values** (none is active by default except where noted):
+
+| | Change | Evidence |
+|---|---|---|
+| P1 | `GAP_OPEN_MIN_MM` 500 → **300** (decision #6) | refused starts 101 → 34 of 200; 0 wrong directions in 600 layouts (§16.11 item 2). `test_direction.py` should be re-run with it before adopting |
+| P2 | `INIT_USE_WALL_YAW = True` (decision #4): the wall fit's yaw for x, y and the seats, not only the tracker's heading | tracking error 84.8 → 1.3 mm in the diagnosed case; removes the wrong seats / colours of A-moderate. Implemented in `lane_init.py`, off by default |
+| P3 | `COLOR_ID_MIN_FRACTION` 0.30 → **0.20** (a checkpoint-D placeholder) | at 300 mm the box is 1.5 × the pillar, so a centred pillar fills ~44 % of it and a few degrees of real yaw take it below 30 % (red 0 %, green 27 % in the diagnosed case); 0 wrong colours with 0.20 |
+
+**Additions made during the work, found necessary in simulation:**
+
+| | Addition | Why |
+|---|---|---|
+| E-A1 | Corner-square nodes (3 × 3 grid per corner) in the visibility graph | a corner square has no obstacles, so no nodes; with the arc-fit rule (#75) a 90° turn at the island corner alone was often impossible (12 of 22 planner failures) |
+| E-A2 | Rear-wheel-feedback steering law as the default (pure pursuit kept, `FOLLOWER_MODE`) | pure pursuit cuts arcs by Ld²/2R: 73 % vs 87 % |
+| E-A3 | Lap-1 lane plans may not cross any other lane's midline | a re-plan from a stop produced a path the wrong way round the island |
+| E-A4 | Reverse straight by 150 / 300 / 450 mm when no forward path exists from a standstill (rule 9.21) | start poses ~300 mm behind a pillar that must be passed on the far side |
+| E-A5 | `START_LANE_OUTER_SEATS_EMPTY`: an UNKNOWN outer seat of the start lane is not a possible pillar (on by default) | rulebook Fig. 8e; otherwise the unknown seats beside the start block the reverse |
+| E-A6 | At a viewing pose, wait only for colours within `COLOR_LOOK_DIST_MM` (800); stop 800 mm short of a pillar of unknown colour | a far pillar hidden behind a near one used up its retries at the viewing pose, then was passed as "either" |
+| E-A7 | If a re-plan while driving fails, keep the current path when it is still valid in the updated map | re-plans from a moving pose next to a pillar sometimes fail |
+| E-A8 | The mock simulators cast LIDAR rays from the sensor (lever arm); the old test harnesses with their own casters pin the lever arm to 0; `test_real_scans` expects y = 1464 − lever arm; `test_lane_tracker` expects the start-lane return re-check; `test_color_id` reads the colour closing from the tracker's events | the CAD lever arm (134.6 mm) is real; the harnesses were written for 0 |
+| E-A9 | Planner / mission parameters: radius = lock × 1.25; inflation 95 mm; clearance 30 mm; viewing poses x ∈ {500, 350, 650}, y 500; finish targets; speeds; look times | chosen and tuned in simulation |
+
+### 16.13 Things to measure or check on the robot (adds to §11)
+
+| What | Where | Why |
+|---|---|---|
+| **Steering lock / minimum radius, each side** | `STEER_LOCK_LEFT_DEG`, `_RIGHT_DEG` (placeholders 46.8 / 54.6) | every arc the planner draws; drive a full-lock circle each way and measure the diameter |
+| Road-wheel angle at servo 20 / 76.5 / 140 | `drive_protocol.h SteerMap`, `SERVO_*` | the servo map is linear placeholder |
+| Speed loop gains | `drive_protocol.h SpeedPI` (kff, kp, ki) | placeholders |
+| **Encoder scale to 0.5 %** | `ENCODER_TICKS_PER_CM` | 87 % → 97 % success under moderate noise |
+| Camera lens position | `CAMERA_*` (139.9 / 0 / 127 from the mount) | the module itself is not in the CAD model |
+| `LIDAR_TIME_OFFSET_S` | config (currently −0.05, set on the Pi) | note: with −0.05, `test_run_track.py` and `test_dashboard.py`'s real-mode tests report 4 wrong seats, because their stand-in LIDAR does not stamp returns with the offset; this was so before checkpoint E (verified on the previous commit). They pass with 0 |
+| Parking lot geometry | `field_map.parking_barriers` | the lot length reference (inner faces, wing included) is an assumption |
+| Compile the drive firmware | `firmware/drive_bridge/` | not compiled here |
+
+### 16.14 Tests and how to run
+
+All 17 suites pass (`test_run_track.py` and `test_dashboard.py` with `LIDAR_TIME_OFFSET_S = 0`, see §16.13). New:
+
+- `test_vg_planner.py`: `tangent()` against geometry (2000 cases, worst 2e-13 mm); the loop frame against global geometry (every lane, direction, start section); **150 rulebook layouts, full lap on the true map: every plan clear by 30 mm, every pillar on its rulebook side (judged in its own lane frame), curvature within the plan radius**, plan time median 0.06 s, max 0.33 s.
+- `test_drive_firmware.py`: `drive_protocol.h` compiled with g++ (-Wall -Wextra -Werror) and fed drive_link's bytes with garbage, a corrupted and a split frame (4/4 decoded, the corrupted one dropped); servo map; 250 ms watchdog; `$STA` parsing through a pseudo-terminal; motion refused before `$STA` and with the WATCHDOG bit.
+
+```bash
+python3 test_vg_planner.py                 # planner (~20 s)
+python3 test_drive_firmware.py             # link + firmware protocol
+python3 sim_closed_loop.py --seed 3 --noise moderate            # one simulated round, printed as it happens
+python3 sweep_closed_loop.py --layouts 200 --trials 3 --noise moderate \
+        --set INIT_USE_WALL_YAW=1 --set COLOR_ID_MIN_FRACTION=0.20 --set GAP_OPEN_MIN_MM=300
+python3 run_mission.py                     # on the robot (drive_bridge firmware)
+```
+
+### 16.15 Files
+
+- **New:** `field_map.py`, `vg_planner.py`, `follower.py`, `mission.py`, `drive_link.py`, `run_mission.py`, `layouts.py`, `sim_closed_loop.py`, `sweep_closed_loop.py`, `test_vg_planner.py`, `test_drive_firmware.py`, `firmware/drive_bridge/drive_bridge.ino`, `firmware/drive_bridge/drive_protocol.h`, `docs/checkpoint_e_runs.png`; the owner's `path_planner.py` and `stm_link.py`, unchanged.
+- **Changed:** `config.py` (CAD geometry and lever arms, planner / mission / follower keys, proposals), `lane_tracker.py` (§16.8), `lane_init.py` (P2, off by default), `stm32_link.py` (`$STA`, `write`), `simulation.py` (`sensor_pose`, lever arm in the mock casting), the test files of E-A8, `README.md` (banner).
+

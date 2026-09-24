@@ -312,7 +312,15 @@ def test_real_and_replay():
                   + (f"; the robot was {r['moved_before_tracker_mm']:.0f} mm down the lane when the "
                      f"tracker was created" if mode == "real-moving" else ""))
         live = r["turns"]
-        rc, out, err = _run(["run_track.py", "--replay-scan", f"{d}/scan.json", "--replay-imu", f"{d}/imu.log"])
+        # the replay runs run_track.py in a fresh process: give it the same lever arm (0) the live
+        # harness pinned, through a one-line wrapper (checkpoint E set the real, CAD-derived lever arm)
+        wrapper = os.path.join(d, "replay_lever0.py")
+        with open(wrapper, "w") as fh:
+            fh.write(f"import sys; sys.path.insert(0, {HERE!r}); import config\n"
+                     "config.LIDAR_OFFSET_FORWARD_MM = 0.0; config.LIDAR_OFFSET_LATERAL_MM = 0.0\n"
+                     "import runpy; sys.argv = ['run_track.py'] + sys.argv[1:]\n"
+                     f"runpy.run_path({os.path.join(HERE, 'run_track.py')!r}, run_name='__main__')\n")
+        rc, out, err = _run([wrapper, "--replay-scan", f"{d}/scan.json", "--replay-imu", f"{d}/imu.log"])
         assert rc == 0, err[-2000:]
         replay = [ln.split("turn", 1)[1].strip() for ln in out.splitlines() if " turn " in ln]
         assert replay == live, (replay, live)
