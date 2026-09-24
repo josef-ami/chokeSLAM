@@ -126,12 +126,16 @@ def measure_x(points: Iterable, direction: str,
     return r
 
 
-def measure_y(points: Iterable) -> YReading:
+def measure_y(points: Iterable, yaw_deg: float = 0.0) -> YReading:
+    """yaw_deg: the robot's yaw from the lane's grid north (clockwise). 0 = the
+    assumption of decision #4; with INIT_USE_WALL_YAW (decision #85) it is the wall
+    fit's yaw, so each return's along-lane distance is taken along the LANE."""
     fan = []
     for p in points:
         a = float(p.angle_deg) if hasattr(p, "angle_deg") else float(tuple(p)[0])
         rng = float(p.dist_mm) if hasattr(p, "dist_mm") else float(tuple(p)[1])
-        off = abs((a + 180.0) % 360.0 - 180.0)          # angle away from dead-ahead
+        a = a + yaw_deg                                  # lane bearing of the return
+        off = abs((a + 180.0) % 360.0 - 180.0)          # angle away from the lane's grid north
         if off <= config.FRONT_FAN_HALF_DEG:
             fan.append(rng * math.cos(math.radians(off)))
     r = YReading(ok=False, n_fan=len(fan))
@@ -145,6 +149,10 @@ def measure_y(points: Iterable) -> YReading:
     r.front_mm = statistics.median(front)
     r.y_sensor_mm = LANE_LENGTH_MM - r.front_mm
     r.y_mm = r.y_sensor_mm - config.LIDAR_OFFSET_FORWARD_MM
+    if yaw_deg:
+        # the lever arm points along the robot, not the lane
+        r.y_mm = r.y_sensor_mm - config.LIDAR_OFFSET_FORWARD_MM * math.cos(math.radians(yaw_deg)) \
+            - config.LIDAR_OFFSET_LATERAL_MM * math.sin(math.radians(yaw_deg))
     if not (0.0 < r.y_mm < LANE_LENGTH_MM):
         r.reason = f"y = {r.y_mm:.0f} mm is outside the lane (0..{LANE_LENGTH_MM:.0f})"
         return r
@@ -160,12 +168,24 @@ def initialise(points: Iterable, params: so.DetectParams | None = None) -> InitR
     if d.direction is None:
         return InitResult(ok=False, reason=f"direction: {d.reason}", direction=d)
     xr = measure_x(pts, d.direction, walls=(d.left.fit, d.right.fit))
-    yr = measure_y(pts)
+    yaw = 0.0
+    if config.INIT_USE_WALL_YAW and d.wall_angle_deg is not None:
+        # checkpoint E, P2 (INIT_USE_WALL_YAW, decision #85, approved): use the wall fit's
+        # yaw for x, y and the seats too, not only for the tracker's starting heading
+        yaw = -d.wall_angle_deg
+        if xr.ok:
+            c, sn = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+            h = lf.handedness(d.direction)
+            xr.x_sensor_mm = xr.x_sensor_mm * c                    # d(90/270) is along the ray, x is perpendicular
+            # lever arm rotated by the yaw: the reference point is F behind / L right of the sensor
+            F, L = config.LIDAR_OFFSET_FORWARD_MM, config.LIDAR_OFFSET_LATERAL_MM
+            xr.x_mm = xr.x_sensor_mm - h * (F * sn - L * c)
+    yr = measure_y(pts, yaw)
     if not xr.ok or not yr.ok:
         why = "; ".join(f"{n}: {r.reason}" for n, r in (("x", xr), ("y", yr)) if not r.ok)
         return InitResult(ok=False, reason=why, direction=d, x=xr, y=yr)
     p = detect_params_from_config(params)
     seats = so.detect_seat_occupancy(pts, xr.x_mm, yr.y_mm, d.direction,
-                                     robot_yaw_deg=0.0, params=p)
+                                     robot_yaw_deg=yaw, params=p)
     return InitResult(ok=True, reason=f"{d.direction}, x={xr.x_mm:.0f}, y={yr.y_mm:.0f}",
-                      direction=d, x=xr, y=yr, yaw_deg=0.0, seats=seats)
+                      direction=d, x=xr, y=yr, yaw_deg=yaw, seats=seats)

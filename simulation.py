@@ -341,12 +341,23 @@ def make_world(direction: str, start_slot: int, y_start: float, rng: random.Rand
     return path, start_sec, s0, pillars, truth
 
 
+def sensor_pose(gx: float, gy: float, brg: float) -> tuple[float, float, float]:
+    """The LIDAR's global position for a robot pose REFERENCE point at (gx, gy)
+    facing grid bearing brg (config.LIDAR_OFFSET_*, + lateral = left).
+    Checkpoint E: the reference point is the rear-axle midpoint and the LIDAR
+    sits 134.6 mm ahead of it, so rays must start at the sensor, not the pose."""
+    b = math.radians(brg)
+    F, L = config.LIDAR_OFFSET_FORWARD_MM, config.LIDAR_OFFSET_LATERAL_MM
+    return gx + F * math.sin(b) - L * math.cos(b), gy + F * math.cos(b) + L * math.sin(b), brg
+
+
 def cast_revolution(pose_at, t_end: float, rev_s: float, pillars: list[Pillar], rng: random.Random,
                     n: int = 720) -> list[tuple[float, float, int, float]]:
     """One revolution of the spinning LIDAR ending at time t_end, each ray cast
     from pose_at(t) = (gx, gy, grid bearing) at the time t it was measured.
     Ray k is taken at the fraction k / n of the revolution in the sensor's own
-    raw order (raw angle increasing with time). Returns raw (raw angle, dist,
+    raw order (raw angle increasing with time). pose_at gives the robot's pose
+    reference point; the rays start at the LIDAR (sensor_pose, lever arm). Returns raw (raw angle, dist,
     quality, t_measured); rays inside the rear blind wedge return nothing."""
     raw = []
     for k in range(n):
@@ -355,7 +366,7 @@ def cast_revolution(pose_at, t_end: float, rev_s: float, pillars: list[Pillar], 
         if abs((rel - config.REAR_BLIND_ARC_CENTER_DEG + 180.0) % 360.0 - 180.0) <= config.REAR_BLIND_ARC_WIDTH_DEG / 2.0:
             continue
         t = t_end - rev_s * (1.0 - k / n)
-        x, y, b = pose_at(t)
+        x, y, b = sensor_pose(*pose_at(t))          # pose_at gives the REFERENCE point
         for _, d, q in simulate_scan(x, y, (b + rel) % 360.0, pillars, n_points=1, rng_noise=rng):
             raw.append((raw_angle, d, q, t))
     return raw
@@ -415,6 +426,7 @@ def run_mock(direction: str = "CCW", start_slot: int = 0, y_start: float = 1400.
             p.color = color_rng.choice(["red", "green"])
 
     def scan_points(gx, gy, brg):
+        gx, gy, brg = sensor_pose(gx, gy, brg)           # the rays start at the LIDAR (lever arm)
         raw = simulate_scan(gx, gy, brg, pillars, n_points=720, rng_noise=rng,
                             blind_center_deg=config.REAR_BLIND_ARC_CENTER_DEG,
                             blind_width_deg=config.REAR_BLIND_ARC_WIDTH_DEG)

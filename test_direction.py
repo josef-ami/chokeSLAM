@@ -25,6 +25,11 @@ from __future__ import annotations
 # The simulated worlds in this file are RULEBOOK fields: pin the lane width
 # before anything imports mat_geometry, whatever config.py is set to.
 import config
+# Checkpoint E set the real lever arm (LIDAR 134.6 mm ahead of the rear axle, from CAD).
+# This suite's own ray-casting / worlds were written for the sensor AT the pose point,
+# so it pins the lever arm to 0 (the lever arm itself is tested in test_init.test_lever_arm).
+config.LIDAR_OFFSET_FORWARD_MM = 0.0
+config.LIDAR_OFFSET_LATERAL_MM = 0.0
 config.LANE_WIDTH_MM = 1000.0
 
 import math

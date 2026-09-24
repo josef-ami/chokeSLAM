@@ -125,6 +125,8 @@ class LaneRecord:
     frozen_t: float | None = None   # Pi time the re-check froze (a frame taken before it still counts)
     empty_downgraded: int = 0       # EMPTY verdicts turned UNKNOWN by the coverage check (P10)
     max_shift_mm: float = 0.0       # de-skew: the largest distance a return was moved
+    recheck_lane_index: int | None = None   # the lane (index) during which this record's re-check runs
+                                            # (entry: its first visit; start lane: lane 4, decision #82)
 
 
 @dataclass
@@ -237,12 +239,24 @@ class LaneTracker:
         self.distance_mm += abs(ds)
         self._last = s
         self._check_turn(s.t_ms)
-        if self._recheck_active and self.y >= config.RECHECK_Y_MAX_MM:
+        if self._recheck_active and not self._window_open(self.lanes[self.slot], self.y):
             self._freeze(s.t_ms)
         self._hist.append(self.t_now, self._ox, self._oy, self.heading, self._lane_pose())
         px = self.path[-1]
         if px[0] != self.lane_index or math.hypot(px[1] - self.x, px[2] - self.y) >= 20.0:
             self.path.append((self.lane_index, self.x, self.y))
+
+    def _window_open(self, rec: LaneRecord, y: float) -> bool:
+        """Is the re-check window of `rec` open at lane y? Always below
+        RECHECK_Y_MAX_MM (decision #19); past it (checkpoint E, decision #81)
+        only while a still-UNKNOWN seat lies at least RECHECK_AHEAD_MIN_MM ahead."""
+        if y < config.RECHECK_Y_MAX_MM:
+            return True
+        if not config.RECHECK_EXTEND:
+            return False
+        seats = {st.index: st for st in so.seats()}
+        return any(v.state == "unknown" and seats[i].y_mm >= y + config.RECHECK_AHEAD_MIN_MM
+                   for i, v in rec.seats.items())
 
     def _lane_pose(self) -> tuple[int, float, float, float]:
         return (self.lane_index, self.x, self.y, self.psi)
@@ -271,11 +285,31 @@ class LaneTracker:
         if self.slot not in self.lanes:
             self.lanes[self.slot] = LaneRecord(slot=self.slot, first_lane_index=self.lane_index,
                                                source="entry",
-                                               seats={s.index: SeatState() for s in so.seats()})
-            self._recheck_active = self.y < config.RECHECK_Y_MAX_MM
+                                               seats={s.index: SeatState() for s in so.seats()},
+                                               recheck_lane_index=self.lane_index)
+            self._recheck_active = self._window_open(self.lanes[self.slot], self.y)
             self.lanes[self.slot].frozen = not self._recheck_active
+        elif (self.slot == 0 and self.lane_index == 4 and config.RECHECK_START_LANE_ON_RETURN
+              and self._start_lane_incomplete()):
+            # decision #82 (Q7b): lap 1 comes back to the start lane -- re-check its unknown seats
+            # once (initialisation could not see the seats beside and behind the start pose) and ask
+            # again for the colour of any pillar whose colour is still unknown
+            rec = self.lanes[0]
+            rec.recheck_lane_index, rec.frozen, rec.frozen_t = self.lane_index, False, None
+            self._recheck_active = self._window_open(rec, self.y)
+            rec.frozen = not self._recheck_active
+            for i, st in rec.seats.items():
+                if st.state == so.Occupancy.OCCUPIED.value and st.color == color_id.UNKNOWN:
+                    self.rerequest_color(0, i)
+            self._event("recheck_start_lane", "lap 1 back in the start lane: re-checking "
+                        f"{sum(1 for v in rec.seats.values() if v.state == 'unknown')} unknown seat(s)", t_ms)
         else:
             self._recheck_active = False
+
+    def _start_lane_incomplete(self) -> bool:
+        rec = self.lanes[0]
+        return any(st.state == "unknown" or (st.state == so.Occupancy.OCCUPIED.value and st.color == color_id.UNKNOWN)
+                   for st in rec.seats.values())
 
     def _freeze(self, t_ms: int) -> None:
         rec = self.lanes[self.slot]
@@ -322,9 +356,9 @@ class LaneTracker:
                 return None
             lane_index, x, y, psi = lp
             rec = self.lanes.get(lane_index % 4)
-            if (rec is None or rec.source != "entry" or rec.first_lane_index != lane_index
+            if (rec is None or rec.recheck_lane_index != lane_index
                     or (rec.frozen and (rec.frozen_t is None or t_end > rec.frozen_t))
-                    or y >= config.RECHECK_Y_MAX_MM):
+                    or not self._window_open(rec, y)):
                 if self._recheck_active and lane_index != self.lane_index:
                     self.lanes[self.slot].frames_skipped_old += 1
                 return None
@@ -344,10 +378,11 @@ class LaneTracker:
         for r in readings:
             st = rec.seats[r.seat.index]
             if st.state == "unknown" and r.state is not so.Occupancy.UNKNOWN:
-                rec.seats[r.seat.index] = SeatState(r.state.value, "entry", r.reason,
-                                                    round(y, 1), rec.first_lane_index)
+                src = "entry" if rec.source == "entry" else "return"
+                rec.seats[r.seat.index] = SeatState(r.state.value, src, r.reason,
+                                                    round(y, 1), rec.recheck_lane_index)
                 if r.state is so.Occupancy.OCCUPIED:
-                    self._request_color(rec.slot, r.seat.index, rec.first_lane_index)
+                    self._request_color(rec.slot, r.seat.index, rec.recheck_lane_index)
         return readings
 
     def _coverage_check(self, points, readings, rec) -> list:
@@ -399,6 +434,20 @@ class LaneTracker:
         st.color, st.color_lane_index = "pending", lane_index
         st.color_reason = "pending: waiting for a camera frame with the seat in view"
         self._color_pending.append((slot, seat_index))
+
+    def rerequest_color(self, slot: int, seat_index: int) -> bool:
+        """Checkpoint E, decision #72 ("stop and look again"): ask once more for
+        the colour of a PRESENT seat whose colour ended UNKNOWN. Only for a seat
+        of the CURRENT lane (the camera judges it in this lane's frame).
+        Returns True if a request was opened."""
+        if slot != self.slot or slot not in self.lanes:
+            return False
+        st = self.lanes[slot].seats[seat_index]
+        if st.state != so.Occupancy.OCCUPIED.value or st.color != color_id.UNKNOWN:
+            return False
+        st.color, st.color_attempts, st.color_out_of_view, st.color_window_t = None, 0, 0, None
+        self._request_color(slot, seat_index, self.lane_index)
+        return True
 
     def _close_color(self, slot: int, seat_index: int, color: str, reason: str) -> None:
         st = self.lanes[slot].seats[seat_index]

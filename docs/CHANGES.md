@@ -8,6 +8,7 @@ This is the running record of every change made to this repository from Septembe
 | **B** | STM32 → Pi feed (BNO08x yaw + hall encoder), lane tracker, turn detection, lane switching, entry-corner seat re-check, simulated STM32 feed, `run_track.py` review tool, de-skew of the re-check's LIDAR frames (P9) | **APPROVED (23 Sept, decisions #37 and #39).** |
 | **C** | Dashboard rewritten lane by lane, mock mode in real time, tuning panel, Save run; fixes P10 and P11 to B's entry re-check | **APPROVED (23 Sept, decisions #45 and #46).** |
 | **D** | OV5647 fisheye camera for pillar colour ID only, keyed off PRESENT seat verdicts (the owner's draft, executed with four owner decisions on points the draft left open or got wrong) | **Implemented and tested in simulation (§15, decisions #53–#65). Awaiting approval.** Camera lever arm, height, bearing sign and colour thresholds are unmeasured (§15.8). |
+| **E** | Connection of the localization (tracker, seats, colours) to the owner's visibility-graph path planner: lap 1 lane by lane (look, then plan), laps 2–3 from one final map; closed-loop path following on the Pi; DRIVE link and drive firmware; car geometry from the CAD model; a closed-loop rulebook simulation | **Implemented and simulated (§16, decisions #66–#83). P1–P3 and additions E-A1–E-A9 APPROVED (decisions #84–#87) and active.** Steering lock, servo map and speed gains are placeholders (§16.3, §16.13). |
 
 Nothing has been committed to git. Every change is an uncommitted edit on top of your last commit `dd9c8f4 added lane frame`, so `git diff` shows exactly what changed.
 
@@ -30,6 +31,7 @@ Nothing has been committed to git. Every change is an uncommitted edit on top of
 13. [Portable STM32 stream snippet](#13-portable-stm32-stream-snippet-50-awaiting-approval)
 14. [The obstacle-round v7 firmware as the STM32 side](#14-the-obstacle-round-v7-firmware-as-the-stm32-side-52-awaiting-approval)
 15. [Checkpoint D: pillar colour identification](#15-checkpoint-d-pillar-colour-identification-ov5647-fisheye)
+16. [Checkpoint E: localization -> path planner, and the closed-loop simulation](#16-checkpoint-e-localization---path-planner-and-the-closed-loop-simulation)
 
 ---
 
@@ -1640,3 +1642,225 @@ The camera answers one question: **for a seat the LIDAR has already called PRESE
 1. The four owner decisions as built: pose at capture (#62), wait until in view (#63), Picamera2 (#64), box from camera height and the dashboard (#65).
 2. The draft's values, still proposals: 0.3 s window, 5 attempts, 30% fraction, 2× margin, 1.5× box; plus the placeholders `CAMERA_HEIGHT_MM` = 150 and the HSV ranges.
 3. The additions the draft didn't name: the simulated camera in mock mode and `run_mock`, and `camera_check.py`.
+
+
+## 16. Checkpoint E: localization -> path planner, and the closed-loop simulation
+
+**Status: implemented and simulated; awaiting approval.** The owner's game plan: on lap 1, localize lane by lane (chokeSLAM) and plan each lane; on laps 2 and 3, plan from the combined map of lap 1 and follow the optimised path. Inputs: `path_planner.py`, `path_planning_method.md`, `stm_link.py` and the simulation report of the planner (the owner's, `report.md`), the CAD model (`ASMB.3mf`, `ASMB.step`) and the rulebook.
+
+![Two simulated rounds](checkpoint_e_runs.png)
+
+### 16.1 Decision log (checkpoint E)
+
+| # | Question | Decision |
+|---|---|---|
+| 66 | The report's fixed planner (`path_planner_fixed.py`) | **Not available.** Its fixes B1–B10 are re-applied to the owner's method (§16.5) |
+| 67 | What drives the car | **The Pi closes the loop**: a path follower on the tracker's pose sends a road-wheel angle and a speed; the STM32 only executes (§16.6) |
+| 68 | Planning frame | **One right-handed loop frame**, the dashboard's (display.py), in mm; the tracker's lane frames convert into it exactly |
+| 69 | The report's simulation harness | **Not available**; rebuilt (§16.10) |
+| 70 | Lap 1 | **Look, then plan**: stop a few seconds at each corner's viewing pose while the entry re-check and the camera decide the next lane |
+| 71 | Pillars as obstacles | The seat's rulebook centre, 50 × 50 mm; red keeps right, green keeps left, each relative to its own lane; a gate on the forbidden side |
+| 72 | Unknowns | **UNKNOWN seat = a pillar that may be passed on either side. PRESENT pillar of unknown colour = stop and look again** |
+| 73 | Laps 2–3 | One final map; one closed lap path from the start lane's viewing pose back to it, followed twice, then the finish; re-planned only if the car drifts more than `REPLAN_DEVIATION_MM` off it |
+| 74 | Firmware | **In scope.** A new sketch built from the approved IMU bridge; v7 untouched |
+| 75 | Corners the steering can't make (B7) | **Reject** a corner whose arc (separate left / right radius) doesn't fit, instead of shrinking the radius |
+| 76 | Finish and start | Stop with the whole car inside the start section after lap 3; **parking later**; start from the middle zone above the lot |
+| 77 | Link | STM32 → Pi: the `$IMU` line unchanged plus a `$STA` status line; Pi → STM32: the owner's binary DRIVE frame (`stm_link.py`); `Stm32Link` owns the port; TELEM not used |
+| 78 | Steering lock | **Placeholder**: the report's outer-body radii (270 / 249.9 mm) converted to this car's geometry: **46.8° left, 54.6° right**. To be measured |
+| 79 | Speeds | 500 mm/s on lap 1, 800 mm/s on laps 2–3, arcs slower (lateral acceleration limit) |
+| 80 | Car measurements | **All from the CAD model** (§16.3). Pose reference point = the rear-axle midpoint |
+| 81 | Entry re-check (Q7a) | Past y = 1000 it stays open (lap 1) while a still-UNKNOWN seat is at least `RECHECK_AHEAD_MIN_MM` ahead (relaxes #19) |
+| 82 | Start lane (Q7b) | Re-checked once when lap 1 returns to it (lane index 4), with its unknown colours asked for again (relaxes #20, #23) |
+| 83 | Simulation | Rulebook layouts, the real chokeSLAM stack in the loop; wall or pillar contact counts as failure (stricter than 9.18 / 9.20); no pose correction after initialisation unless the simulation shows it is needed |
+| 84 | P1 (after the simulation, §16.12) | **Approved:** `GAP_OPEN_MIN_MM` 500 → 300 (replaces #6's 500) |
+| 85 | P2 | **Approved:** `INIT_USE_WALL_YAW = True`: the wall fit's yaw for x, y and the seats at initialisation (replaces #4's yaw 0 for them) |
+| 86 | P3 | **Approved:** `COLOR_ID_MIN_FRACTION` 0.30 → 0.20 |
+| 87 | Additions E-A1–E-A9 | **Approved, all** (corner nodes, rear-wheel feedback, forward-only lap-1 plans, reversing, start-lane outer seats empty, colour look distance, keep a still-valid path, lever arm in the simulators and harnesses, planner / mission parameters) |
+
+### 16.2 Rulebook facts used (new in E)
+
+| Fact | Source | Used for |
+|---|---|---|
+| Outer walls are a fixed square; the rounded shapes on Fig. 11 are mat lines | 13.16, Fig. 11 | no outer "corner radius" (the planner's `outer_corner_radius_m` is not a wall) |
+| Lap complete = the car has completely left the last corner section; the start section counts in lap 1 | 10.2 table, 1.2 | lap counting; the sign rules end when lap 3 is complete |
+| Signs only have to be obeyed on the three official laps | App. A.5, last paragraph | finish: free side for start-lane pillars beyond its entry line (the y = 1000 row keeps its side: 9.26) |
+| Wrong side ends the round only once the car has completely crossed the pillar's line, wall to wall | 9.24.5, App. A.5 | the gate is that line, from the pillar to the forbidden wall |
+| Single sign: the middle seat of the outer row | Fig. 8b | layouts |
+| 36 cards, card 9 / 10 removed, three drawn for the next sections clockwise | step 3, Fig. 8c | layouts (read at 260 dpi; duplicates kept) |
+| Lot at the end of its section that a CCW car reaches last, against the outer wall, 200 mm deep, 1.5 × car length | Figs. 4, 8d; §5 | `field_map.parking_barriers` (length taken between the limitations' inner faces with the full outline, wing included: 425 mm; ASSUMPTION) |
+| Start section: every sign moves to the inner row | Fig. 8e | layouts; E-A5 |
+| Touching walls is allowed if they don't move; a pillar may move within its 85 mm circle (8 vs 10 points) | 9.18, 9.20, 10.2 | the simulation is stricter (#83) |
+| Driving against the round direction is allowed in two sections | 9.21, App. A.4 | E-A4 (reversing) |
+| 3 minutes | 9.2 | time limit in the simulation |
+
+### 16.3 The car, from the CAD model (#80)
+
+`ASMB.3mf` (1028 bodies, one frame, mm; y up, floor at y = −14.2, front toward −z, left toward −x: the part names fix the handedness) and `ASMB.step` (the same assembly with part names).
+
+| Quantity | Value | How |
+|---|---|---|
+| Wheelbase | 135.9 mm | tyre centres, front z 4.5, rear z 140.35 |
+| Track | 101 mm | tyre centres |
+| Wheels | 54 mm diameter | tyres |
+| Footprint below 100 mm (wall / pillar height) | 228.7 × 114.1 mm: **197.3 ahead of, 31.5 behind the rear axle, ±57.2** | all vertices below 100 mm (`BODY_*`) |
+| Full outline (wing included, 169–180 mm high) | 283.5 × 174 × 179.5 mm, 86.2 behind the rear axle | `OUTLINE_*`; within 300 × 200 × 300 (11.1) |
+| LIDAR spin axis | **134.6 mm ahead, 0.7 mm right** of the rear-axle midpoint | circle fit on the upside-down turret (`LIDAR_OFFSET_*`) |
+| Camera lens | **139.9 mm ahead, centred, 127 mm high** | the camera module is not modelled; its mount ("Camera mount") has the Pi-camera hole pattern (21 × 12.5 mm) round an 18 mm lens hole (`CAMERA_*`) |
+| Steering lock | **not in a static model**: placeholder 46.8° left / 54.6° right (#78) | report's outer-body radii 270 / 249.9 → rear-axle radius √(R² − 197.3²) − 57.2 = 127.4 / 96.4 mm → atan(135.9 / R) |
+
+Consequences: the lever arm changes what the tracker's x and y mean (the rear axle, not the LIDAR). The 23 Sept scan (robot 3.5° off parallel) now initialises at x = 484, y = 1302: the LIDAR at y 1436 measured along the lane with the wall-fit yaw (#85; 1464 with yaw 0), and the lever arm rotated by the yaw. The mock simulators now cast from the sensor (E-A8).
+
+### 16.4 Architecture
+
+```
+LIDAR ─┐                       ┌─ field_map.build_world (loop frame: pillars, gates, island, lot)
+STM32 ─┼─> LaneTracker (pose, ─┤
+camera ┘    lanes, seats,      └─ mission.Mission ── vg_planner.plan ──> Path (rear axle)
+            colours)                    │                                  │
+                                        └──────── follower.PurePursuit <───┘ (rear-wheel feedback)
+                                                         │ DriveCmd (steer + left, speed)
+                                   drive_link.DriveLink ─┘ ── DRIVE frame ──> STM32 drive_bridge
+```
+
+- **field_map.py.** The loop frame is display.py's frame; `tracker_pose` gives the rear axle in it (heading θ = 90° − the tracker's unwrapped heading). Every seat that is OCCUPIED or UNKNOWN is a 50 × 50 mm pillar (#71, #72); a known colour adds a **gate**: a line at the pillar's lane y from the pillar to 100 mm beyond the forbidden wall (sealed into the wall and into the inflated island). The lot's two limitations are obstacles in the start lane. `checkpoint(slot)` is a line across a lane at its midline. `corner_nodes` is E-A1.
+- **vg_planner.py** (§16.5), **follower.py** (§16.6), **mission.py** (§16.7).
+- **run_mission.py** runs it on the robot: STM32 link, start scan, `lane_init`, `LaneTracker`, STOP frames until the start button, then the mission at 50 Hz; STOP on every exit.
+
+### 16.5 The planner (vg_planner.py): the owner's method with B1–B10
+
+The method is the owner's: inflated obstacle corners → visibility graph → Dijkstra → tangent-arc smoothing. Units mm, loop frame, maths angles. The path is for the rear-axle midpoint.
+
+| Report bug | In vg_planner |
+|---|---|
+| B1 start heading ignored | The path leaves the start **pose**: a lock-radius arc (left or right) until it points along the first leg ("turn first"), and it ends in a goal **pose** the same way ("turn last"); start → goal directly is a Dubins CSC. One routine, `tangent()`, serves circle → circle / point → circle / circle → point |
+| B2 pass sides not enforced | gates (field_map) no leg may cross |
+| B3 side from start → goal | each pillar's side is relative to its own lane |
+| B4 walls / island unknown | field margin, island as an obstacle |
+| B5 diagonal through an obstacle | legs are clipped against each inflated box's interior (Liang–Barsky) |
+| B6 body swing | the smoothed path is checked with the **footprint** (`BODY_*` + `PLAN_CLEARANCE_MM`) every 10 mm; an obstacle it touches is inflated by `PLAN_INFLATION_STEP_MM` and the plan repeated (up to `PLAN_MAX_ITER`) |
+| B7 radius shrunk below the lock (#75) | a corner is allowed only if its arc (lock radius × `PLAN_RADIUS_FACTOR`, left 159.5 / right 120.7 mm) fits in half of each adjacent leg (the whole leg at the start and goal legs). The search is a Dijkstra over (previous node, node, checkpoints crossed), so it sees this |
+| B8 forced corner pivots | none: **checkpoints** (lane midlines) must be crossed in order |
+| B9 fixed lap-1 corner arc | none: the corner is part of the path into the next viewing pose |
+| B10 dead code | not carried over |
+
+Goals that are themselves closer than the clearance to something are dropped before searching. A start or goal inside an inflated box shrinks that box's inflation to just below the pose's distance.
+
+### 16.6 The follower (follower.py)
+
+At 50 Hz: the nearest path sample (monotonic search), then the steering law, then the lock clamp. Speed = min(cruise, √(`LAT_ACCEL` × R) on arcs, braking to the end), at least `SPEED_MIN_MM_S` until the last 40 mm. **Pure pursuit** (#67) cuts every arc inward by about Ld²/2R, tens of mm on this car's S-bends against a 30 mm clearance: in simulation it grazed pillars. The default is therefore **rear-wheel feedback** (E-A2): curvature feed-forward (taken `RWF_PREVIEW_S` ahead for the servo lag and link latency) plus lateral and heading error feedback (errors at the nearest point), so a lateral error dies out over about `RWF_LENGTH_MM` (150). `FOLLOWER_MODE = "pp"` restores pure pursuit.
+
+### 16.7 The mission (mission.py)
+
+- **LOOK** (standing still): wait `LOOK_SETTLE_S`, then until the lane's seats are decided and the colours of pillars within `COLOR_LOOK_DIST_MM` are known (re-asked up to `COLOR_LOOK_RETRIES` times), at most `LOOK_TIMEOUT_S` (× 4 while a colour is pending).
+- **Lap 1 plan** (#70): world = this lane + the next; start = the tracked pose; goal = the next lane's viewing pose (its lane (`VIEW_X_MM`, `VIEW_Y_MM`), ψ 0; the cheapest of three x); the current lane's midline as a checkpoint if still ahead; every other midline a no-cross line (E-A3).
+- **Lap 1 drive**: re-plan whenever a seat verdict or colour of those two lanes changes; if the re-plan fails, keep the current path when it is still valid in the updated map (E-A7). A PRESENT pillar of unknown colour within `COLOR_LOOK_DIST_MM` ahead stops the car and its colour is asked for again (#72); after the retries it is passed as "either" (logged).
+- Driving into a viewing pose makes the tracker switch lanes (its turn rule) and open the next lane's re-check. After four lanes the car is at the start lane's viewing pose V0 (lane index 4): the start lane is re-checked (#82), then **the final map**.
+- **Laps 2–3** (#73): path = V0 → V0 (four midlines in order) + the same lap again + the finish, as one continuous path; re-planned from the current pose if more than `REPLAN_DEVIATION_MM` off it.
+- **Finish** (#76): a pose in the start section with the whole outline `FINISH_MARGIN_MM` inside; the start-lane pillars beyond its entry line are "either" (App. A.5).
+- **Reverse** (E-A4): when no forward path exists from a standstill, back up straight by the shortest clear step of `REVERSE_STEPS_MM`, then look and plan again.
+
+### 16.8 Tracker changes (lane_tracker.py)
+
+- `LaneRecord.recheck_lane_index`: the lane index during which a record's re-check runs (entry: its first visit; start lane: 4).
+- `_window_open` (#81): the window is y < `RECHECK_Y_MAX_MM`, or (lap-1 extension) a still-UNKNOWN seat at least `RECHECK_AHEAD_MIN_MM` ahead. Frames and the freeze both use it.
+- Start-lane return (#82): at the turn into lane index 4, if the start lane has an unknown seat or an unknown colour, its re-check reopens (event `recheck_start_lane`) and its unknown colours are asked for again. Seats decided then have source `"return"`.
+- `rerequest_color(slot, seat)` (#72): a new colour request for a PRESENT seat whose colour ended UNKNOWN, in the current lane only.
+
+### 16.9 Link and firmware (#74, #77)
+
+- `stm32_link.py`: `$STA,<seq_ack>,<status>` lines are kept as `status()["sta"]`, never counted bad; `write(bytes)` sends on the same port under a lock.
+- `drive_link.py`: `DriveCmd` → the owner's `DriveFrame` (DIRECT, closed-loop speed) or the STOP frame; motion is refused (STOP sent) unless `$IMU` and `$STA` are fresh and the WATCHDOG bit is clear. `stm_link.py` and `path_planner.py` are the owner's files, unchanged (the first imports the second).
+- `firmware/drive_bridge/`: `drive_protocol.h` (hardware-free: frame parser with resync and checksum, 250 ms watchdog, road-wheel → servo map, speed PI, `$STA` format) and `drive_bridge.ino` (the approved bridge's pins, encoder, IMU and `$IMU` line, plus the DRIVE receiver, servo, motor, PB12 button, `$STA` at 20 Hz). HEADING_HOLD is treated as STOP (the Pi steers with DIRECT). **The servo map and speed gains are placeholders**; the sketch is not compiled here (as §14.4); `drive_protocol.h` is compiled with g++ by `test_drive_firmware.py`.
+
+### 16.10 The simulation (layouts.py, sim_closed_loop.py, sweep_closed_loop.py)
+
+- **Layouts**: exactly the rulebook draw (§16.2); start = the middle zone above the lot, the car's outline centred in it.
+- **Car**: kinematic bicycle at the rear axle, `WHEELBASE_MM`; steering 60 ms lag + 400°/s rate limit + the lock; speed 150 ms lag; commands 20 ms late; 10 ms steps.
+- **The real stack in the loop**: the start scan (ray-cast from the LIDAR, parking limitations included) → `lane_init.initialise`; `$IMU` lines from the true motion (`SimStm32`) → `LaneTracker`; 500-point swept LIDAR revolutions at 10 Hz while the tracker asks (timed, de-skewed); rendered fisheye frames (`camera_sim.render`) at 10 Hz while it asks; `Mission` at 50 Hz.
+- **Noise presets** (per trial): `none`; `moderate` (the report's: start ±10 mm / ±2°, encoder scale ±2 %, steering bias 1° + 1° per command, IMU drift 0.5°/min + 0.15° noise, lock ±5 %, speed ±5 %); `moderate_cal` (the same with the encoder calibrated to ±0.5 %); `harsh` (twice moderate).
+- **Judge** (§ docstring of sim_closed_loop): contact of the footprint with a pillar, limitation, the island or the wall; wrong side (the car's centre crossing a pillar's line on the wrong side before lap 3 is complete); laps (the whole outline into the start section, at least 4 m driven since the last); finish (stopped, whole outline in the start section); 180 s.
+
+### 16.11 Results
+
+Rulebook layouts 0–199 (`layouts.draw(Random(k))`), 1 trial with no noise, 3 with noise (2 for harsh). "Of initialised" leaves out the starts that initialisation refuses. Re-run: `python3 sweep_closed_loop.py --layouts 200 --trials 3 --noise moderate [--set NAME=VALUE ...]`.
+
+| Configuration | Noise | Runs | Initialised | **Success of initialised** | Overall | Failures (of initialised) |
+|---|---|---|---|---|---|---|
+| A: as approved (P1–P3 off) | none | 200 | 99 | **99 / 99 = 100 %** | 49.5 % | – |
+| A | moderate | 600 | 320 | **263 / 320 = 82.2 %** | 43.8 % | wrong side 36 (35 after a colour was given up), contact 20, planner 1 |
+| B: A + P1 + P2 + P3 (**now the defaults**; re-run on the plain config after #84–#86: identical) | none | 200 | 166 | **166 / 166 = 100 %** | 83.0 % | – |
+| B | moderate | 600 | 530 | **463 / 530 = 87.4 %** | 77.2 % | contact 48, planner 18, wrong side 1 |
+| B | moderate, encoder calibrated to 0.5 % | 600 | 530 | **512 / 530 = 96.6 %** | 85.3 % | planner 17, contact 1 |
+| B | harsh (2 × moderate) | 400 | 350 | **156 / 350 = 44.6 %** | 39.0 % | contact 112, wrong side 58, planner 24 |
+| C: B + clearance 40 / inflation 105 mm | moderate | 600 | 530 | **506 / 530 = 95.5 %** | 84.3 % | planner 16, contact 8 |
+| D: B with pure pursuit | moderate | 200 | 175 | **127 / 175 = 72.6 %** | 63.5 % | contact 43, planner 4, wrong side 1 |
+
+Across all runs: **0 wrong seat verdicts and 0 wrong colours** in B / C (4 wrong seats and 1 wrong colour in A-moderate, all from the 84 mm initialisation error that P2 removes). Successful runs take 46–48 s median (max 64 s) of the 180 s. The closest pillar pass is about 30 mm median.
+
+What the numbers say:
+
+1. **Without noise the integration works**: every initialised start, both directions, finishes 3 laps and stops in the start section.
+2. **Initialisation is the largest single loss.** As approved (`GAP_OPEN_MIN_MM` 500), it refuses 101 / 200 rulebook starts (57 % of CCW starts): the rulebook moves the start section's signs to the inner row, and a pillar on the far inner seat hides most of the opening past the island. That never happened in the earlier tests, which placed pillars at random away from the start. P1 (300) refuses 34 / 200 with **0 wrong directions in 600 layouts**. The rest are CW starts with the middle inner seat occupied: the pillar hides the whole opening, and no threshold helps (a different cue is needed; not done).
+3. **Placement yaw.** With yaw 0 at initialisation (#4), y is off by about 15 mm per degree; the moderate preset's occasional 4–6° placement puts the camera's box off the pillar (colour given up → passed as "either" → wrong side) and the LIDAR seat check on the wrong seat. P2 removes this (84.8 → 1.3 mm in the diagnosed case).
+4. **Dead reckoning** is the remaining error: the ±2 % encoder scale error becomes up to about 50 mm at the corners (along-track error of one lane becomes lateral error in the next), against 30 mm of clearance. Calibrating the encoder to 0.5 % (C11: roll a measured 2 m) takes moderate from 87 % to 97 %; 40 mm clearance takes it to 95 %. Harsh noise (2 × moderate) is not survivable without a pose correction during the laps.
+5. **The follower matters**: rear-wheel feedback 87 % vs pure pursuit 73 % under the same noise (pure pursuit cuts every arc).
+6. **Remaining planner failures (≈ 3 %)** are all at the start: the car stands about 300 mm behind the start section's far inner pillar, which must be passed on the island side, and even after backing up (E-A4) no path exists within the 30 mm clearance. A longer reverse or a first leg planned with less clearance would address it.
+
+### 16.12 Proposals and additions (all APPROVED: #84–#87, now the defaults)
+
+**Proposals that changed approved values:**
+
+| | Change | Evidence |
+|---|---|---|
+| P1 | `GAP_OPEN_MIN_MM` 500 → **300** (decision #6) | refused starts 101 → 34 of 200; 0 wrong directions in 600 layouts (§16.11 item 2). `test_direction.py` passes with it |
+| P2 | `INIT_USE_WALL_YAW = True` (decision #4): the wall fit's yaw for x, y and the seats, not only the tracker's heading | tracking error 84.8 → 1.3 mm in the diagnosed case; removes the wrong seats / colours of A-moderate. Implemented in `lane_init.py`; on (#85) |
+| P3 | `COLOR_ID_MIN_FRACTION` 0.30 → **0.20** (a checkpoint-D placeholder) | at 300 mm the box is 1.5 × the pillar, so a centred pillar fills ~44 % of it and a few degrees of real yaw take it below 30 % (red 0 %, green 27 % in the diagnosed case); 0 wrong colours with 0.20 |
+
+**Additions made during the work, found necessary in simulation (#87):**
+
+| | Addition | Why |
+|---|---|---|
+| E-A1 | Corner-square nodes (3 × 3 grid per corner) in the visibility graph | a corner square has no obstacles, so no nodes; with the arc-fit rule (#75) a 90° turn at the island corner alone was often impossible (12 of 22 planner failures) |
+| E-A2 | Rear-wheel-feedback steering law as the default (pure pursuit kept, `FOLLOWER_MODE`) | pure pursuit cuts arcs by Ld²/2R: 73 % vs 87 % |
+| E-A3 | Lap-1 lane plans may not cross any other lane's midline | a re-plan from a stop produced a path the wrong way round the island |
+| E-A4 | Reverse straight by 150 / 300 / 450 mm when no forward path exists from a standstill (rule 9.21) | start poses ~300 mm behind a pillar that must be passed on the far side |
+| E-A5 | `START_LANE_OUTER_SEATS_EMPTY`: an UNKNOWN outer seat of the start lane is not a possible pillar (on by default) | rulebook Fig. 8e; otherwise the unknown seats beside the start block the reverse |
+| E-A6 | At a viewing pose, wait only for colours within `COLOR_LOOK_DIST_MM` (800); stop 800 mm short of a pillar of unknown colour | a far pillar hidden behind a near one used up its retries at the viewing pose, then was passed as "either" |
+| E-A7 | If a re-plan while driving fails, keep the current path when it is still valid in the updated map | re-plans from a moving pose next to a pillar sometimes fail |
+| E-A8 | The mock simulators cast LIDAR rays from the sensor (lever arm); the old test harnesses with their own casters pin the lever arm to 0; `test_real_scans` expects the LIDAR at y 1436 with the wall-fit yaw (1464 with yaw 0) and the pose point one rotated lever arm behind it; `test_lane_tracker` expects the start-lane return re-check; `test_color_id` reads the colour closing from the tracker's events | the CAD lever arm (134.6 mm) is real; the harnesses were written for 0 |
+| E-A9 | Planner / mission parameters: radius = lock × 1.25; inflation 95 mm; clearance 30 mm; viewing poses x ∈ {500, 350, 650}, y 500; finish targets; speeds; look times | chosen and tuned in simulation |
+
+### 16.13 Things to measure or check on the robot (adds to §11)
+
+| What | Where | Why |
+|---|---|---|
+| **Steering lock / minimum radius, each side** | `STEER_LOCK_LEFT_DEG`, `_RIGHT_DEG` (placeholders 46.8 / 54.6) | every arc the planner draws; drive a full-lock circle each way and measure the diameter |
+| Road-wheel angle at servo 20 / 76.5 / 140 | `drive_protocol.h SteerMap`, `SERVO_*` | the servo map is linear placeholder |
+| Speed loop gains | `drive_protocol.h SpeedPI` (kff, kp, ki) | placeholders |
+| **Encoder scale to 0.5 %** | `ENCODER_TICKS_PER_CM` | 87 % → 97 % success under moderate noise |
+| Camera lens position | `CAMERA_*` (139.9 / 0 / 127 from the mount) | the module itself is not in the CAD model |
+| `LIDAR_TIME_OFFSET_S` | config (currently −0.05, set on the Pi) | note: with −0.05, `test_run_track.py` and `test_dashboard.py`'s real-mode tests report 4 wrong seats, because their stand-in LIDAR does not stamp returns with the offset; this was so before checkpoint E (verified on the previous commit). They pass with 0 |
+| Parking lot geometry | `field_map.parking_barriers` | the lot length reference (inner faces, wing included) is an assumption |
+| Compile the drive firmware | `firmware/drive_bridge/` | not compiled here |
+
+### 16.14 Tests and how to run
+
+All 17 suites pass with P1–P3 on (`test_run_track.py` and `test_dashboard.py` with `LIDAR_TIME_OFFSET_S = 0`, see §16.13). New:
+
+- `test_vg_planner.py`: `tangent()` against geometry (2000 cases, worst 2e-13 mm); the loop frame against global geometry (every lane, direction, start section); **150 rulebook layouts, full lap on the true map: every plan clear by 30 mm, every pillar on its rulebook side (judged in its own lane frame), curvature within the plan radius**, plan time median 0.06 s, max 0.33 s.
+- `test_drive_firmware.py`: `drive_protocol.h` compiled with g++ (-Wall -Wextra -Werror) and fed drive_link's bytes with garbage, a corrupted and a split frame (4/4 decoded, the corrupted one dropped); servo map; 250 ms watchdog; `$STA` parsing through a pseudo-terminal; motion refused before `$STA` and with the WATCHDOG bit.
+
+```bash
+python3 test_vg_planner.py                 # planner (~20 s)
+python3 test_drive_firmware.py             # link + firmware protocol
+python3 sim_closed_loop.py --seed 3 --noise moderate            # one simulated round, printed as it happens
+python3 sweep_closed_loop.py --layouts 200 --trials 3 --noise moderate \
+        --set INIT_USE_WALL_YAW=1 --set COLOR_ID_MIN_FRACTION=0.20 --set GAP_OPEN_MIN_MM=300
+python3 run_mission.py                     # on the robot (drive_bridge firmware)
+```
+
+### 16.15 Files
+
+- **New:** `field_map.py`, `vg_planner.py`, `follower.py`, `mission.py`, `drive_link.py`, `run_mission.py`, `layouts.py`, `sim_closed_loop.py`, `sweep_closed_loop.py`, `test_vg_planner.py`, `test_drive_firmware.py`, `firmware/drive_bridge/drive_bridge.ino`, `firmware/drive_bridge/drive_protocol.h`, `docs/checkpoint_e_runs.png`; the owner's `path_planner.py` and `stm_link.py`, unchanged.
+- **Changed:** `config.py` (CAD geometry and lever arms, planner / mission / follower keys, proposals), `lane_tracker.py` (§16.8), `lane_init.py` (P2, on: #85), `stm32_link.py` (`$STA`, `write`), `simulation.py` (`sensor_pose`, lever arm in the mock casting), the test files of E-A8, `README.md` (banner).
+
